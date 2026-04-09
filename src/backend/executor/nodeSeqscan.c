@@ -33,6 +33,9 @@
 #include "executor/executor.h"
 #include "executor/nodeSeqscan.h"
 #include "utils/rel.h"
+#include "catalog/pg_operator.h"
+#include "../utils/misc/autoindex.h"
+#include "nodes/nodeFuncs.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
 
@@ -282,6 +285,42 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 		else
 			scanstate->ss.ps.ExecProcNode = ExecSeqScanWithQualProject;
 	}
+	if (node->scan.plan.qual != NIL)
+    {
+        ListCell   *lc;
+
+        foreach(lc, node->scan.plan.qual)
+        {
+            Node *qual_node = (Node *) lfirst(lc);
+
+            if (IsA(qual_node, OpExpr))
+            {
+                OpExpr *op = (OpExpr *) qual_node;
+
+                /* Check if the operator is equality '=' */
+                HeapTuple op_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(op->opno));
+                if (HeapTupleIsValid(op_tup))
+                {
+                    Form_pg_operator op_form = (Form_pg_operator) GETSTRUCT(op_tup);
+                    if (strncmp(NameStr(op_form->oprname), "=", 1) == 0)
+                    {
+                        /* Ensure the left argument is a column (Var) */
+                        Node *left_arg = (Node *) linitial(op->args);
+                        if (IsA(left_arg, Var))
+                        {
+                            Var *var = (Var *) left_arg;
+                            if (var->varattno > 0) /* Skip system columns */
+                            {
+                                Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
+                                TrackEqualityPredicate(relid, var->varattno);
+                            }
+                        }
+                    }
+                    ReleaseSysCache(op_tup);
+                }
+            }
+        }
+    }
 
 	return scanstate;
 }

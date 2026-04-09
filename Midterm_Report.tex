@@ -1,0 +1,166 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+\title{Project Overview: Automated Index Generation}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+The goal was to modify the PostgreSQL executor to track sequential scans on table columns and automatically trigger a CREATE INDEX command once a specific frequency threshold is reached.
+
+\section*{Changes Made to the Codebase}
+
+\subsection*{1. src/include/utils/autoindex.h}
+
+\textbf{Changes:}
+\begin{itemize}[leftmargin=*]
+\item Defined the \texttt{AutoIndexKey} struct (mapping relid and attnum).
+\item Defined the \texttt{AutoIndexEntry} struct (storing the scan\_count).
+\item Set the \texttt{AUTOINDEX\_THRESHOLD} (the trigger limit, currently set to 5).
+\item Declared function prototypes for shared memory initialization and tracking.
+\end{itemize}
+
+\noindent\textbf{Reasoning:}
+
+\noindent Centralizing these definitions ensures that both the shared memory management and the executor-level tracking use the same data structures and threshold logic.
+
+\section*{2. src/backend/storage/ipc/ipci.c}
+
+\textbf{Changes:}
+\begin{itemize}[leftmargin=*]
+\item Modified \texttt{CreateSharedMemoryAndSemaphores} to include calls to \texttt{AutoIndexShmemSize() and AutoIndexShmemInit()}.
+\end{itemize}
+
+\noindent\textbf{Reasoning:}
+
+\noindent PostgreSQL uses a fixed-size shared memory segment. We must register our new hash table during the server's pre-initialization phase so that all background processes (backends) share the same scan counters.
+
+\section*{3. src/backend/executor/nodeSeqscan.c}
+
+\textbf{Changes:}
+\begin{itemize}[leftmargin=*]
+\item Added a hook inside ExecInitSeqScan.
+\item The code iterates through the scan's filter predicates (plan->qual) to identify equality expressions (e.g., \texttt{WHERE col = 100}).
+\item Extracts the AttrNumber and calls TrackEqualityPredicate().
+\end{itemize}
+
+\noindent\textbf{Reasoning:}
+
+\noindent ExecInitSeqScan is the "entry point" for every sequential scan. By intercepting the plan here, we can accurately record when a developer is querying an unindexed column repeatedly.
+
+\section*{4. src/backend/utils/misc/autoindex.c}
+
+This is the core logic file. Significant refinements were made here to handle PostgreSQL’s strict memory and transaction safety rules.
+
+\subsection*{Key Logic: TrackEqualityPredicate}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{System Filter:} Added an \texttt{OID} check (\texttt{relid < 16384}) to ignore System Catalogs.
+
+```
+Why: This prevents the recursive loop where the auto-indexer tries to index Postgres's own metadata tables during a \texttt{\textbackslash d} command.
+
+\item \textbf{Shared Memory Access:} Uses LWLockAcquire (AddinShmemInitLock) to ensure thread-safe increments of scan counts across multiple concurrent users.
+```
+
+\end{itemize}
+
+\subsection*{Key Logic: ExecuteAutoIndex}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Variable Scoping:} All declarations were moved to the top of the function to comply with ISO C89 standards.
+
+```
+\item \textbf{Memory Management:} Added pstrdup() for relation and attribute names.
+
+Why: This copies strings into local memory, preventing "use-after-free" errors if the system cache is invalidated during index creation.
+
+\item \textbf{Manual Node Construction:} Instead of using the version-dependent makeIndexElem(), we manually initialized the IndexElem struct.
+
+Why: This bypassed "undeclared function" errors caused by refactored headers in the PostgreSQL source.
+
+\item \textbf{Transaction Safety (\texttt{PG\_TRY / PG\_CATCH}):} Wrapped the DefineIndex call in a trial block.
+
+Why: This allows the original \texttt{SELECT} query to finish even if the index creation hits a lock conflict, preventing a full session crash.
+
+\item \textbf{Concurrency Setting:} Set \texttt{stmt->concurrent = false}.
+
+Why: While concurrent builds are great for production, they cannot be triggered from inside an active transaction. Standard builds are significantly more stable for this specific executor-hook implementation.
+
+\end{itemize}
+
+\section*{Final Results}
+
+The system now successfully:
+\begin{itemize}[leftmargin=*]
+\item Detects repeated scans on user tables.
+\item Ignores internal system queries.
+\item Automatically generates valid B-Tree indices.
+\item Maintains database stability by catching resource-owner conflicts.
+\end{itemize}
+
+\section*{Current Implementation Status}
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Success:} Indices are appearing in \texttt{\textbackslash d} after reaching the threshold.
+\end{itemize}
+
+\section*{Future Extensions}
+
+\textbf{1. Cost-Benefit Thresholding}
+
+\begin{itemize}
+    \item \textbf{Concept:} Replace the "magic number" threshold with a financial model of system resources.
+
+    \item \textbf{Logic:} Trigger creation only when
+    \texttt{(N $\times$ Savings) > Creation Cost} where \texttt{Savings = cost\_seqscan - cost\_indexscan}
+
+    \item \textbf{Implementation:} Utilize internal cost\_seqscan and cost\_indexscan metrics to estimate the "break-even" point for CPU and I/O.
+\end{itemize}
+
+\noindent\textbf{2. Asynchronous Background Worker (BGW)}
+
+\begin{itemize}
+    \item \textbf{Concept:} Decouple index creation from the user's \texttt{SELECT} process.
+
+    \item \textbf{Logic:} The Executor places a request in a shared memory queue; a dedicated \texttt{BGW} process handles the \texttt{DDL}.
+
+    \item \textbf{Benefit:} Eliminates "Resource Owner" conflicts and session latency. Enables the safe use of \texttt{CREATE INDEX CONCURRENTLY}.
+\end{itemize}
+
+\noindent\textbf{3. Selectivity Analysis}
+
+\begin{itemize}
+    \item \textbf{Concept:} Prevent "weak" indexes on low-cardinality columns (e.g., Booleans, Gender).
+
+    \item \textbf{Logic:} Query pg\_statistic to check the stadistinct value.
+
+    \item \textbf{Action:} Abort auto-indexing if the column filters out less than a significant percentage (e.g., \texttt{<20\%}) of the total table rows.
+\end{itemize}
+
+\noindent\textbf{4. Composite (Multi-Column) Indexing}
+
+\begin{itemize}
+    \item \textbf{Concept:} Recognize patterns of multi-clause queries.
+
+    \item \textbf{Logic:} If \texttt{WHERE A = x AND B = y} is common, detect the co-occurrence of predicates in the plan tree.
+
+    \item \textbf{Outcome:} Generate a single composite index \texttt{(A, B)} instead of two redundant single-column indexes.
+\end{itemize}
+
+\noindent\textbf{5. "Human-in-the-Loop" Approval Mode}
+
+\begin{itemize}
+    \item \textbf{Concept:} Provide administrative oversight for database changes.
+
+    \item \textbf{Logic:} Instead of immediate execution, log proposed indexes to a system table (e.g., pg\_index\_proposals).
+
+    \item \textbf{Outcome:} Allows DBAs to review, test, and "approve" auto-generated suggestions before they impact production storage.
+\end{itemize}
+
+\end{document}
