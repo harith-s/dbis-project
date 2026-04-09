@@ -33,7 +33,7 @@ void AutoIndexShmemInit(void) {
 void TrackEqualityPredicate(Oid relid, AttrNumber attnum) {
     if (relid < (Oid) 16384) {/* Skip system catalogs */
         /* Print a message indicating that the system catalog is being skipped */
-        ereport(LOG, (errmsg("AutoIndex: Skipping system table %d", relid)));
+        ereport(LOG, (errmsg("AutoIndex: Skipping system catalog %d", relid)));
         return;
     }
 
@@ -94,7 +94,7 @@ void ExecuteAutoIndex(Oid relid, AttrNumber attnum)
      */
 
     ereport(LOG,
-            (errmsg("AutoIndex: Threshold reached2. Creating index on %s(%s)", 
+            (errmsg("AutoIndex: Threshold reached. Creating index on %s(%s)", 
                     relname, attname)));
 
     /* 2. Construct the Node structures */
