@@ -297,19 +297,19 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
             {
                 OpExpr *op = (OpExpr *) qual_node;
 
-                /* Check if the operator is equality '=' */
+                // We see if its an equal to, other operators we don't want to track for now;
                 HeapTuple op_tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(op->opno));
                 if (HeapTupleIsValid(op_tup))
                 {
                     Form_pg_operator op_form = (Form_pg_operator) GETSTRUCT(op_tup);
                     if (strncmp(NameStr(op_form->oprname), "=", 1) == 0)
                     {
-                        /* Ensure the left argument is a column (Var) */
+                        
                         Node *left_arg = (Node *) linitial(op->args);
                         if (IsA(left_arg, Var))
                         {
                             Var *var = (Var *) left_arg;
-                            if (var->varattno > 0) /* Skip system columns */
+                            if (var->varattno > 0) // to skip system cols
                             {
                                 Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
                                 TrackEqualityPredicate(relid, var->varattno);
