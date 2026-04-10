@@ -9,10 +9,100 @@
 #include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "storage/lwlock.h"
-#include "nodes/nodeFuncs.h" /* For makeIndexElem */
+#include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
+#include "catalog/pg_index.h"
+#include "utils/syscache.h"
+#include "catalog/index.h"
+#include "utils/selfuncs.h"
+#include "access/htup_details.h"
 
 static HTAB *AutoIndexHash = NULL;
+
+//this checks if an index already exists on this relation and attribute
+static bool IndexAlreadyExists(Oid relid, AttrNumber attnum)
+{
+    List *indexList;
+    ListCell *lc;
+
+    indexList = RelationGetIndexList(relation_open(relid, AccessShareLock));
+
+    foreach(lc, indexList)
+    {
+        Oid indexOid = lfirst_oid(lc);
+        HeapTuple indexTuple;
+        Form_pg_index indexForm;
+
+        indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexOid));
+        if (!HeapTupleIsValid(indexTuple))
+            continue;
+
+        indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
+
+        for (int i = 0; i < indexForm->indnatts; i++)
+        {
+            if (indexForm->indkey.values[i] == attnum)
+            {
+                ReleaseSysCache(indexTuple);
+                return true;
+            }
+        }
+
+        ReleaseSysCache(indexTuple);
+    }
+
+    return false;
+}
+
+static double EstimateEqualitySelectivity(Oid relid, AttrNumber attnum)
+{
+    // right now this is just the reciprocal of num of distinct vals but could
+    // use some big brain momints and try to use the histogram
+    HeapTuple statsTuple;
+    Form_pg_statistic stats;
+    double selectivity = 0.1;
+
+    statsTuple = SearchSysCache3(STATRELATTINH,
+                                ObjectIdGetDatum(relid),
+                                Int16GetDatum(attnum),
+                                BoolGetDatum(false));
+
+    if (!HeapTupleIsValid(statsTuple)) return selectivity;
+
+    stats = (Form_pg_statistic) GETSTRUCT(statsTuple);
+
+    if (stats->stadistinct > 0) selectivity = 1.0 / stats->stadistinct;
+    else if (stats->stadistinct < 0) selectivity = -stats->stadistinct;
+
+    ReleaseSysCache(statsTuple);
+    return selectivity;
+}
+
+static bool IsColumnSelective(Oid relid, AttrNumber attnum)
+{
+    HeapTuple statsTuple;
+    Form_pg_statistic stats;
+    bool result = true;
+
+    statsTuple = SearchSysCache3(STATRELATTINH,
+                                ObjectIdGetDatum(relid),
+                                Int16GetDatum(attnum),
+                                BoolGetDatum(false));
+
+    if (HeapTupleIsValid(statsTuple))
+    {
+        stats = (Form_pg_statistic) GETSTRUCT(statsTuple);
+
+        // if a lot of tuples have the smae value for this attribute 
+        // then it is not very selective and creating an index on it would be useless
+        if (stats->stadistinct > 0 && stats->stadistinct < 10)
+            result = false;
+
+        ReleaseSysCache(statsTuple);
+    }
+
+    return result;
+}
 
 Size AutoIndexShmemSize(void) {
     return hash_estimate_size(1024, sizeof(AutoIndexEntry));
@@ -23,7 +113,7 @@ void AutoIndexShmemInit(void) {
     info.keysize = sizeof(AutoIndexKey);
     info.entrysize = sizeof(AutoIndexEntry);
     
-    /* Corrected: ShmemInitHash takes 4 arguments in this version */
+    // Corrected: ShmemInitHash takes 4 arguments in this version
     AutoIndexHash = ShmemInitHash("AutoIndex Hash",
                                   1024,
                                   &info,
@@ -31,8 +121,7 @@ void AutoIndexShmemInit(void) {
 }
 
 void TrackEqualityPredicate(Oid relid, AttrNumber attnum) {
-    if (relid < (Oid) 16384) {/* Skip system catalogs */
-        /* Print a message indicating that the system catalog is being skipped */
+    if (relid < (Oid) 16384) {
         ereport(LOG, (errmsg("AutoIndex: Skipping system catalog %d", relid)));
         return;
     }
@@ -61,11 +150,56 @@ void TrackEqualityPredicate(Oid relid, AttrNumber attnum) {
     current_count = entry->scan_count;
     LWLockRelease(AddinShmemInitLock);
 
+    uint32 dynamic_threshold = AUTOINDEX_THRESHOLD;
+
+    // using relative counts instead of absolute to determine when
+    if (relid % 2 == 0) dynamic_threshold *= 2;
+    
+    // if (current_count >= dynamic_threshold)
     if (current_count == AUTOINDEX_THRESHOLD) {
         LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
         entry->scan_count = 0; 
         LWLockRelease(AddinShmemInitLock);
+        ExecuteAutoIndex(relid, attnum);
+    }
+}
 
+void TrackEqualityPredicate_New(Oid relid, AttrNumber attnum)
+{
+    if (relid < (Oid) 16384) return;
+    if (!AutoIndexHash) return;
+    if (IndexAlreadyExists(relid, attnum)) return;
+
+    if (!IsColumnSelective(relid, attnum)) return;
+
+    AutoIndexKey key;
+    AutoIndexEntry *entry;
+    bool found;
+    uint32 current_count;
+
+    key.relid = relid;
+    key.attnum = attnum;
+
+    LWLockAcquire(LWLockNamedTranche("AutoIndexLock"), LW_EXCLUSIVE);
+
+    entry = (AutoIndexEntry *) hash_search(AutoIndexHash, &key, HASH_ENTER, &found);
+
+    if (!found) entry->scan_count = 1;
+    else entry->scan_count++;
+
+    current_count = entry->scan_count;
+
+    LWLockRelease(LWLockNamedTranche("AutoIndexLock"));
+
+    uint32 dynamic_threshold = AUTOINDEX_THRESHOLD;
+    if (relid % 2 == 0)
+        dynamic_threshold *= 2;
+
+    if (current_count >= dynamic_threshold)
+    {
+        LWLockAcquire(LWLockNamedTranche("AutoIndexLock"), LW_EXCLUSIVE);
+        entry->scan_count = 0;
+        LWLockRelease(LWLockNamedTranche("AutoIndexLock"));
         ExecuteAutoIndex(relid, attnum);
     }
 }
@@ -79,7 +213,6 @@ void ExecuteAutoIndex(Oid relid, AttrNumber attnum)
     IndexStmt  *stmt;
     IndexElem  *iparam;
 
-    /* 1. Get names and immediately copy to fresh memory */
     relname_raw = get_rel_name(relid);
     attname_raw = get_attname(relid, attnum, false);
 
@@ -89,13 +222,9 @@ void ExecuteAutoIndex(Oid relid, AttrNumber attnum)
     relname = pstrdup(relname_raw);
     attname = pstrdup(attname_raw);
 
-    /* * CRITICAL: These functions (get_rel_name) might leave pins in the catcache. 
-     * We don't need them anymore, and we want a clean slate for DefineIndex.
-     */
-
     ereport(LOG,
-            (errmsg("AutoIndex: Threshold reached. Creating index on %s(%s)", 
-                    relname, attname)));
+    (errmsg("AutoIndex: Creating index on %s(%s) after threshold trigger",
+            relname, attname)));                    
 
     /* 2. Construct the Node structures */
     stmt = makeNode(IndexStmt);
@@ -122,24 +251,21 @@ void ExecuteAutoIndex(Oid relid, AttrNumber attnum)
     stmt->idxcomment = "Auto-generated by SeqScan tracker";
     stmt->indexOid = InvalidOid;
     stmt->unique = false;
-    stmt->primary = false;
+    stmt->primary = false; 
     stmt->isconstraint = false;
     stmt->deferrable = false;
     stmt->initdeferred = false;
     stmt->transformed = false;
     
-    /* * CHANGE: Set concurrent to false. 
-     * Inside a running query, 'true' is almost guaranteed to fail 
-     * with "cannot run inside a transaction".
-     */
+    // concurrent being true would be ideal to avoid issues with the shared memory
+    // but causes issues when it is 
     stmt->concurrent = false; 
     stmt->if_not_exists = true;
 
     PG_TRY();
     {
-        /* * DefineIndex is very heavy. Calling it here is "illegal" in standard 
-         * Postgres development, but we can force it by ensuring it's not concurrent.
-         */
+        // if we can ensure that DefineIndex won't fail due to concurrent transaction issues
+        // we can set cincurrent ti false and directly call DefineIndex
         DefineIndex(NULL, relid, stmt, InvalidOid, InvalidOid, InvalidOid, 
                     0, false, false, false, false, true);
     }
