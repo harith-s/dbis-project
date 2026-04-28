@@ -4603,17 +4603,22 @@ ExecModifyTable(PlanState *pstate)
 {
 	ModifyTableState *node = castNode(ModifyTableState, pstate);
 	ModifyTableContext context;
-	EState	   *estate = node->ps.state;
-	CmdType		operation = node->operation;
+	EState *estate = node->ps.state;
+	CmdType operation = node->operation;
 	ResultRelInfo *resultRelInfo;
-	PlanState  *subplanstate;
+	PlanState *subplanstate;
 	TupleTableSlot *slot;
 	TupleTableSlot *oldSlot;
 	ItemPointerData tuple_ctid;
 	HeapTupleData oldtupdata;
-	HeapTuple	oldtuple;
+	HeapTuple oldtuple;
 	ItemPointer tupleid;
-	bool		tuplock;
+
+	// for index remoc=val on bulk insert/delete
+	List *saved_indices = NIL;
+	bool did_bulk_opt = FALSE;
+
+	bool tuplock;
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -5017,6 +5022,49 @@ ExecModifyTable(PlanState *pstate)
 	fireASTriggers(node);
 
 	node->mt_done = true;
+
+	// for index removal on bulk insert/delete, we need to restore indexes
+	// if we had dropped them, even if there are no more tuples to process.
+
+	resultRelInfo = node->resultRelInfo + node->mt_whichplan;
+
+    /*
+     * BULK OPTIMIZATION: if the planner estimates enough rows AND the
+     * operation is a plain INSERT or DELETE (not UPDATE, not on a
+     * partition, not on a table with triggers that depend on indexes),
+     * drop non-essential indexes now.
+     */
+    if (autoindex_bulk_threshold > 0 &&
+        node->ps.plan->plan_rows >= autoindex_bulk_threshold &&
+        (node->operation == CMD_INSERT || node->operation == CMD_DELETE) &&
+        !resultRelInfo->ri_TrigDesc &&        /* no triggers */
+        !resultRelInfo->ri_RelationDesc->rd_rel->relhasrules)
+    {
+        savedIndexes = AutoIndexDropForBulk(resultRelInfo->ri_RelationDesc);
+        didBulkOpt   = (savedIndexes != NIL);
+    }
+
+    /*
+     * Run the actual operation — existing code unchanged below this point.
+     */
+    PG_TRY();
+    {
+        /* ... existing ExecModifyTable loop ... */
+    }
+    PG_CATCH();
+    {
+        /* Abort path: try to restore indexes so the table isn't left
+         * in a partially-indexed state after the rollback.           */
+        if (didBulkOpt)
+            AutoIndexRecreateOnAbort(savedIndexes);
+
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    /* Success path: recreate indexes now that all rows are written */
+    if (didBulkOpt)
+        AutoIndexRecreate(savedIndexes);
 
 	return NULL;
 }

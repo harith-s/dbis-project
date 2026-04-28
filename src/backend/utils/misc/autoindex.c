@@ -17,6 +17,16 @@
 #include "utils/selfuncs.h"
 #include "access/htup_details.h"
 
+// for index removal on bulk insert/delete
+
+#include "autoindex.h"
+#include "access/genam.h"
+#include "access/table.h"
+#include "executor/spi.h"
+#include "utils/fmgroids.h"
+#include "utils/snapmgr.h"
+#include "tcop/utility.h"
+
 static HTAB *AutoIndexHash = NULL;
 
 //this checks if an index already exists on this relation and attribute
@@ -276,4 +286,147 @@ void ExecuteAutoIndex(Oid relid, AttrNumber attnum)
                 (errmsg("AutoIndex: Execution failed. Table may be locked by current scan.")));
     }
     PG_END_TRY();
+}
+
+int autoindex_bulk_threshold = 1000;
+
+/*
+ * Collect all droppable indexes on this relation, drop them,
+ * and return a list of SavedIndexInfo so we can recreate later.
+ *
+ * We skip: primary keys, unique indexes (dropping would break constraints),
+ * and indexes used by active constraints.
+ */ 
+List * AutoIndexDropForBulk(Relation rel)
+{
+    List       *saved = NIL;
+    List       *indexOids;
+    ListCell   *lc;
+
+    /* Get all index OIDs for this relation */
+    indexOids = RelationGetIndexList(rel);
+
+    foreach(lc, indexOids)
+    {
+        Oid             indexOid = lfirst_oid(lc);
+        HeapTuple       indexTuple;
+        Form_pg_index   indexForm;
+        SavedIndexInfo *info;
+
+        indexTuple = SearchSysCache1(INDEXRELID,
+                                     ObjectIdGetDatum(indexOid));
+        if (!HeapTupleIsValid(indexTuple))
+            continue;
+
+        indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
+
+        /* Skip primary keys and unique indexes — dropping them
+         * would silently remove constraint enforcement            */
+        if (indexForm->indisprimary || indexForm->indisunique)
+        {
+            ReleaseSysCache(indexTuple);
+            continue;
+        }
+
+        /* Skip invalid or not-yet-ready indexes */
+        if (!indexForm->indisvalid || !indexForm->indisready)
+        {
+            ReleaseSysCache(indexTuple);
+            continue;
+        }
+
+        /* Save the full CREATE INDEX statement from pg_indexes.
+         * This is the safest way to recreate — handles expressions,
+         * partials, custom opclasses, storage params, etc.         */
+        info = palloc0(sizeof(SavedIndexInfo));
+        info->indexOid  = indexOid;
+        info->relOid    = RelationGetRelid(rel);
+        info->indexName = pstrdup(get_rel_name(indexOid));
+        info->isUnique  = indexForm->indisunique;
+        info->isPrimary = indexForm->indisprimary;
+
+        /* Pull the full definition string from pg_indexes view */
+        info->indexDef  = GetIndexDef(indexOid); /* see below */
+
+        ReleaseSysCache(indexTuple);
+
+        saved = lappend(saved, info);
+    }
+
+    /* Now drop all collected indexes */
+    foreach(lc, saved)
+    {
+        SavedIndexInfo *info = (SavedIndexInfo *) lfirst(lc);
+        index_drop(info->indexOid, false /* concurrent */, true /* concurrent ok */);
+    }
+
+    return saved;
+}
+
+/*
+ * Fetch the full CREATE INDEX statement for an index OID.
+ * pg_get_indexdef() is the canonical way to do this.
+ */
+static char * GetIndexDef(Oid indexOid)
+{
+    return TextDatumGetCString(
+        DirectFunctionCall2(pg_get_indexdef_ext,
+                            ObjectIdGetDatum(indexOid),
+                            BoolGetDatum(false)));
+}
+
+/*
+ * Recreate all saved indexes after the bulk operation completes.
+ * Uses the saved CREATE INDEX string — this handles all index types
+ * correctly without needing to reconstruct from catalog columns.
+ */
+void AutoIndexRecreate(List *savedIndexes)
+{
+    ListCell *lc;
+
+    foreach(lc, savedIndexes)
+    {
+        SavedIndexInfo *info = (SavedIndexInfo *) lfirst(lc);
+        int             ret;
+
+        /* Execute the saved CREATE INDEX statement via SPI */
+        SPI_connect();
+        ret = SPI_execute(info->indexDef, false, 0);
+        SPI_finish();
+
+        if (ret != SPI_OK_UTILITY)
+            ereport(ERROR,
+                    (errmsg("autoindex: failed to recreate index \"%s\"",
+                            info->indexName)));
+    }
+}
+
+/*
+ * Called in the abort path — attempt best-effort recreation.
+ * We suppress errors here because the transaction is already
+ * rolling back; we don't want to mask the original error.
+ */
+void AutoIndexRecreateOnAbort(List *savedIndexes)
+{
+    ListCell *lc;
+
+    foreach(lc, savedIndexes)
+    {
+        SavedIndexInfo *info = (SavedIndexInfo *) lfirst(lc);
+
+        PG_TRY();
+        {
+            SPI_connect();
+            SPI_execute(info->indexDef, false, 0);
+            SPI_finish();
+        }
+        PG_CATCH();
+        {
+            /* Log but don't rethrow — the original error takes priority */
+            elog(WARNING, "autoindex: could not recreate index \"%s\" during abort",
+                 info->indexName);
+            FlushErrorState();
+        }
+        PG_END_TRY();
+    }
 }
