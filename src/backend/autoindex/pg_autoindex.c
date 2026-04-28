@@ -4,6 +4,7 @@
   #include "storage/lwlock.h"
   #include "storage/subsystems.h"
   #include "miscadmin.h"
+  #include "access/transam.h"
 
   AutoindexSharedState *AutoindexShmem = NULL;
 
@@ -36,6 +37,8 @@
   void
   autoindex_record_scan(Oid dboid, Oid reloid, int16 attno)
   {
+      if (reloid < FirstNormalObjectId)
+          return;
       int i;
       AutoindexEntry *entry = NULL;
 

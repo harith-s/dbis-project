@@ -99,11 +99,12 @@ AutoindexWorkerMain(Datum main_arg)
         {
             if (got_sigterm)
                 proc_exit(0);
-                
+
             char *relname;
             char *schemaname;
             char *colname;
-            char  sql[512];
+            char  sql[1024];
+            char  idxname[NAMEDATALEN];
 
             SetCurrentStatementStartTimestamp();
             StartTransactionCommand();
@@ -118,11 +119,15 @@ AutoindexWorkerMain(Datum main_arg)
 
             if (relname && schemaname && colname)
             {
+                snprintf(idxname, sizeof(idxname), "auto_idx_%u_%d", 
+                    candidates_rel[i], candidates_att[i]);
+
                 snprintf(sql, sizeof(sql),
-                         "CREATE INDEX IF NOT EXISTS ON %s.%s (%s)",
-                         quote_identifier(schemaname),
-                         quote_identifier(relname),
-                         quote_identifier(colname));
+                    "CREATE INDEX IF NOT EXISTS %s ON %s.%s (%s)",
+                    quote_identifier(idxname),
+                    quote_identifier(schemaname),
+                    quote_identifier(relname),
+                    quote_identifier(colname));
 
                 SPI_execute(sql, false, 0);
 
