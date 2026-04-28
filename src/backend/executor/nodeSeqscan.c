@@ -36,6 +36,7 @@
 #include "catalog/pg_operator.h"
 #include "../utils/misc/autoindex.h"
 #include "nodes/nodeFuncs.h"
+#include "autoindex/pg_autoindex.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
 
@@ -312,7 +313,7 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                             if (var->varattno > 0) // to skip system cols
                             {
                                 Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
-                                TrackEqualityPredicate(relid, var->varattno);
+                                autoindex_record_scan(MyDatabaseId, relid, var->varattno);
                             }
                         }
                     }

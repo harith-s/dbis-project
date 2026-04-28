@@ -24,7 +24,6 @@
 #include "storage/shmem_internal.h"
 #include "storage/subsystems.h"
 #include "utils/guc.h"
-#include "../../utils/misc/autoindex.h"
 
 /* GUCs */
 int			shared_memory_type = DEFAULT_SHARED_MEMORY_TYPE;
@@ -74,10 +73,6 @@ CalculateShmemSize(void)
 	/* include additional requested shmem from preload libraries */
 	size = add_size(size, total_addin_request);
 
-	/* [AUTO-INDEX START] */
-	size = add_size(size, AutoIndexShmemSize());
-	/* [AUTO-INDEX END] */
-
 	/* might as well round it off to a multiple of a typical page size */
 	size = add_size(size, 8192 - (size % 8192));
 
@@ -109,9 +104,6 @@ AttachSharedMemoryStructs(void)
 	/* Establish pointers to all shared memory areas in this backend */
 	ShmemAttachRequested();
 
-	/* [AUTO-INDEX START] */
-	AutoIndexShmemInit();
-	/* [AUTO-INDEX END] */
 
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations
@@ -161,9 +153,6 @@ CreateSharedMemoryAndSemaphores(void)
 	/* Initialize dynamic shared memory facilities. */
 	dsm_postmaster_startup(shim);
 
-	/* [AUTO-INDEX START] */
-	AutoIndexShmemInit();
-	/* [AUTO-INDEX END] */
 
 	/*
 	 * Now give loadable modules a chance to set up their shmem allocations

@@ -76,6 +76,7 @@
 #include <sys/param.h>
 #include <netdb.h>
 #include <limits.h>
+#include "autoindex/pg_autoindex.h"
 
 #ifdef USE_BONJOUR
 #include <dns_sd.h>
@@ -915,12 +916,13 @@ PostmasterMain(int argc, char *argv[])
 	 * repeat the test.
 	 */
 	LocalProcessControlFile(false);
-
+	
 	/*
 	 * Register the apply launcher.  It's probably a good idea to call this
 	 * before any modules had a chance to take the background worker slots.
 	 */
 	ApplyLauncherRegister();
+	AutoindexRegister();
 
 	/*
 	 * Register the shared memory needs of all core subsystems.

@@ -19,6 +19,7 @@ include $(top_builddir)/src/Makefile.global
 SUBDIRS = \
 	access \
 	archive \
+	autoindex \
 	backup \
 	bootstrap \
 	catalog \

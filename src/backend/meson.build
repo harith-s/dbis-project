@@ -9,6 +9,7 @@ post_export_backend_sources = []
 
 subdir('access')
 subdir('archive')
+subdir('autoindex)
 subdir('backup')
 subdir('bootstrap')
 subdir('catalog')

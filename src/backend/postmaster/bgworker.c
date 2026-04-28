@@ -38,6 +38,7 @@
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
 #include "utils/wait_event.h"
+#include "autoindex/pg_autoindex.h"
 
 /*
  * The postmaster's list of registered background workers, in private memory.
@@ -166,6 +167,10 @@ static const struct
 	{
 		.fn_name = "DataChecksumsWorkerMain",
 		.fn_addr = DataChecksumsWorkerMain
+	},
+	{
+		.fn_name = "AutoindexWorkerMain",
+		.fn_addr = AutoindexWorkerMain
 	}
 };
 
