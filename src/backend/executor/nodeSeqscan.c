@@ -34,7 +34,6 @@
 #include "executor/nodeSeqscan.h"
 #include "utils/rel.h"
 #include "catalog/pg_operator.h"
-#include "../utils/misc/autoindex.h"
 #include "nodes/nodeFuncs.h"
 #include "autoindex/pg_autoindex.h"
 
