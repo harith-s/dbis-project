@@ -7,14 +7,24 @@
   #include "access/transam.h"
 
   AutoindexSharedState *AutoindexShmem = NULL;
+  DropindexSharedState *DropindexShmem = NULL;
 
   static void autoindex_shmem_request(void *arg);
   static void autoindex_shmem_init(void *arg);
+
+  static void dropindex_shmem_request(void *arg);
+  static void dropindex_shmem_init(void *arg);
+
 
   const ShmemCallbacks AutoindexShmemCallbacks = {
       .request_fn = autoindex_shmem_request,
       .init_fn    = autoindex_shmem_init,
   };
+
+    const ShmemCallbacks DropindexShmemCallbacks = {
+        .request_fn = dropindex_shmem_request,
+        .init_fn    = dropindex_shmem_init,
+    };
 
   static void
   autoindex_shmem_request(void *arg)
@@ -22,6 +32,14 @@
       ShmemRequestStruct(.name = "AutoIndex",
                          .size = sizeof(AutoindexSharedState),
                          .ptr  = (void **) &AutoindexShmem);
+  }
+
+  static void 
+  dropindex_shmem_request(void *arg)
+  {
+      ShmemRequestStruct(.name = "DropIndex",
+                         .size = sizeof(DropindexSharedState),
+                         .ptr  = (void **) &DropindexShmem);
   }
 
   static void
@@ -32,6 +50,16 @@
       LWLockInitialize(&AutoindexShmem->lock.lock, tranche_id);
       AutoindexShmem->num_entries = 0;
       memset(AutoindexShmem->entries, 0, sizeof(AutoindexShmem->entries));
+  }
+
+  static void
+  dropindex_shmem_init(void *arg)
+  {
+      int tranche_id = LWLockNewTrancheId("DropIndex");
+
+      LWLockInitialize(&DropindexShmem->lock.lock, tranche_id);
+      DropindexShmem->num_entries = 0;
+      memset(DropindexShmem->entries, 0, sizeof(DropindexShmem->entries));
   }
 
   void
@@ -86,4 +114,54 @@
       ereport(DEBUG1,
               (errmsg("autoindex: db=%u rel=%u att=%d count=%ld",
                       dboid, reloid, (int) attno, (long) entry->scan_count)));
+  }
+
+  void dropindex_record_scan(Oid dboid, Oid reloid) {
+      if (reloid < FirstNormalObjectId)
+          return;
+      int i;
+      DropindexEntry *entry = NULL;
+
+      if (!DropindexShmem)
+          return;
+
+      LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+
+      for (i = 0; i < DropindexShmem->num_entries; i++)
+      {
+          DropindexEntry *e = &DropindexShmem->entries[i];
+          if (e->in_use &&
+              e->dboid  == dboid &&
+              e->reloid == reloid)
+          {
+              entry = e;
+              break;
+          }
+      }
+
+      if (!entry)
+      {
+          if (DropindexShmem->num_entries >= DROPINDEX_MAX_ENTRIES)
+          {
+              LWLockRelease(&DropindexShmem->lock.lock);
+              ereport(WARNING,
+                      (errmsg("dropindex: shmem table full, dropping entry")));
+              return;
+          }
+          entry = &DropindexShmem->entries[DropindexShmem->num_entries++];
+          entry->dboid           = dboid;
+          entry->reloid          = reloid;
+          entry->in_use          = true;
+          entry->index_dropped = false;
+          entry->update_count      = 0;
+      }
+
+      if (!entry->index_dropped)
+          entry->update_count++;
+
+      LWLockRelease(&DropindexShmem->lock.lock);
+
+      ereport(DEBUG1,
+              (errmsg("dropindex: db=%u rel=%u count=%ld",
+                      dboid, reloid, (long) entry->update_count)));
   }

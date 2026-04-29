@@ -923,6 +923,7 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	ApplyLauncherRegister();
 	AutoindexRegister();
+	DropindexRegister();
 
 	/*
 	 * Register the shared memory needs of all core subsystems.

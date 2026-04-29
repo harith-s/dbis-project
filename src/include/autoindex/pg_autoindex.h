@@ -8,6 +8,8 @@
 
 #define AUTOINDEX_MAX_ENTRIES  1024
 #define AUTOINDEX_THRESHOLD    5
+#define DROPINDEX_MAX_ENTRIES 1024
+#define DROPINDEX_THRESHOLD   5
 
 typedef struct AutoindexEntry {
     Oid     dboid;
@@ -18,18 +20,38 @@ typedef struct AutoindexEntry {
     int64   scan_count;
 } AutoindexEntry;
 
+typedef struct DropindexEntry {
+    Oid     dboid;
+    Oid     reloid;
+    bool    in_use;
+    bool    index_dropped;
+    int64   update_count;
+} DropindexEntry;
+
 typedef struct AutoindexSharedState {
     LWLockPadded  lock;
     int           num_entries;
     AutoindexEntry entries[AUTOINDEX_MAX_ENTRIES];
 } AutoindexSharedState;
 
+typedef struct DropindexSharedState {
+    LWLockPadded  lock;
+    int           num_entries;
+    DropindexEntry entries[DROPINDEX_MAX_ENTRIES];
+} DropindexSharedState;
+
 extern AutoindexSharedState *AutoindexShmem;
 extern const ShmemCallbacks AutoindexShmemCallbacks;
+
+extern DropindexSharedState *DropindexShmem;
+extern const ShmemCallbacks DropindexShmemCallbacks;
 
 extern void autoindex_record_scan(Oid dboid, Oid reloid, int16 attno);
 extern void AutoindexRegister(void);
 extern void AutoindexWorkerMain(Datum main_arg);
-extern void AutoindexRegister(void);
+
+extern void dropindex_record_scan(Oid dboid, Oid reloid);
+extern void DropindexRegister(void);
+extern void DropindexWorkerMain(Datum main_arg);
 
 #endif

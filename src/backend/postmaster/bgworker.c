@@ -171,7 +171,11 @@ static const struct
 	{
 		.fn_name = "AutoindexWorkerMain",
 		.fn_addr = AutoindexWorkerMain
-	}
+	},
+	{
+		.fn_name = "DropindexWorkerMain",
+		.fn_addr = DropindexWorkerMain
+	},
 };
 
 /* Private functions. */

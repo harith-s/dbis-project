@@ -17,11 +17,23 @@
 void AutoindexWorkerMain(Datum main_arg);
 void AutoindexRegister(void);
 
+void DropindexWorkerMain(Datum main_arg);
+void DropindexRegister(void);
+
 static volatile sig_atomic_t got_sigterm = false;
 
 /* Signal handler for SIGTERM */
 static void
 autoindex_sigterm(SIGNAL_ARGS)
+{
+    int save_errno = errno;
+    got_sigterm = true;
+    SetLatch(MyLatch);
+    errno = save_errno;
+}
+
+static void
+dropindex_sigterm(SIGNAL_ARGS)
 {
     int save_errno = errno;
     got_sigterm = true;
@@ -159,6 +171,144 @@ AutoindexWorkerMain(Datum main_arg)
 }
 
 void
+DropindexWorkerMain(Datum main_arg)
+{
+    pqsignal(SIGHUP, SignalHandlerForConfigReload);
+    pqsignal(SIGTERM, dropindex_sigterm);
+
+    BackgroundWorkerUnblockSignals();
+    BackgroundWorkerInitializeConnection("postgres", NULL, 0);
+
+    ereport(LOG, (errmsg("dropindex worker started")));
+
+    for (;;)
+    {
+        int   rc;
+        Oid   candidates_rel[DROPINDEX_MAX_ENTRIES];
+        int   ncandidates = 0;
+
+        if (got_sigterm)
+            proc_exit(0);
+
+        rc = WaitLatch(MyLatch,
+                       WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                       30000L,
+                       PG_WAIT_EXTENSION);
+        ResetLatch(MyLatch);
+
+        if (rc & WL_EXIT_ON_PM_DEATH)
+            proc_exit(0);
+
+        if (ConfigReloadPending)
+        {
+            ConfigReloadPending = false;
+            ProcessConfigFile(PGC_SIGHUP);
+        }
+
+        if (got_sigterm)
+            proc_exit(0);
+
+        /* collect candidate relations */
+        if (!DropindexShmem)
+        {
+            ereport(FATAL,
+                    (errmsg("dropindex worker: shared memory not initialized")));
+        }
+
+        LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+
+        for (int i = 0; i < DropindexShmem->num_entries; i++)
+        {
+            DropindexEntry *e = &DropindexShmem->entries[i];
+
+            if (e->in_use &&
+                !e->index_dropped &&
+                e->dboid == MyDatabaseId &&
+                e->update_count >= DROPINDEX_THRESHOLD)
+            {
+                e->index_dropped = true;
+                candidates_rel[ncandidates++] = e->reloid;
+            }
+        }
+
+        LWLockRelease(&DropindexShmem->lock.lock);
+
+        /* process each relation */
+        for (int i = 0; i < ncandidates; i++)
+        {
+            if (got_sigterm)
+                proc_exit(0);
+
+            PG_TRY();
+            {
+                char sql[1024];
+
+                SetCurrentStatementStartTimestamp();
+                StartTransactionCommand();
+                PushActiveSnapshot(GetTransactionSnapshot());
+                SPI_connect();
+
+                /*
+                 * Fetch all indexes on this table with schema
+                 */
+                snprintf(sql, sizeof(sql),
+                         "SELECT n.nspname, c.relname "
+                         "FROM pg_index i "
+                         "JOIN pg_class c ON c.oid = i.indexrelid "
+                         "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                         "WHERE i.indrelid = %u",
+                         candidates_rel[i]);
+
+                SPI_execute(sql, true, 0);
+
+                for (uint64 j = 0; j < SPI_processed; j++)
+                {
+                    char *schemaname = SPI_getvalue(SPI_tuptable->vals[j],
+                                                    SPI_tuptable->tupdesc, 1);
+                    char *idxname = SPI_getvalue(SPI_tuptable->vals[j],
+                                                 SPI_tuptable->tupdesc, 2);
+
+                    if (!schemaname || !idxname)
+                        continue;
+
+                    /* only drop auto-created indexes */
+                    if (strncmp(idxname, "auto_idx_", 9) != 0)
+                        continue;
+
+                    char dropsql[512];
+                    snprintf(dropsql, sizeof(dropsql),
+                             "DROP INDEX IF EXISTS %s.%s",
+                             quote_identifier(schemaname),
+                             quote_identifier(idxname));
+
+                    SPI_execute(dropsql, false, 0);
+
+                    ereport(LOG,
+                            (errmsg("dropindex: dropped index %s.%s",
+                                    schemaname, idxname)));
+                }
+
+                SPI_finish();
+                PopActiveSnapshot();
+                CommitTransactionCommand();
+            }
+            PG_CATCH();
+            {
+                EmitErrorReport();
+                FlushErrorState();
+
+                ereport(WARNING,
+                        (errmsg("dropindex: failed for relation %u",
+                                candidates_rel[i])));
+
+                AbortCurrentTransaction();
+            }
+            PG_END_TRY();
+        }
+    }
+}
+
+void
 AutoindexRegister(void)
 {
     BackgroundWorker worker;
@@ -176,3 +326,23 @@ AutoindexRegister(void)
 
     RegisterBackgroundWorker(&worker);
 }
+
+void
+DropindexRegister(void)
+{
+    BackgroundWorker worker;
+
+    memset(&worker, 0, sizeof(worker));
+    snprintf(worker.bgw_name, BGW_MAXLEN, "dropindex worker");
+    snprintf(worker.bgw_type, BGW_MAXLEN, "dropindex worker");
+    worker.bgw_flags        = BGWORKER_SHMEM_ACCESS |
+                              BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time   = BgWorkerStart_RecoveryFinished;
+    worker.bgw_restart_time = 10;
+    strcpy(worker.bgw_library_name, "postgres");
+    strcpy(worker.bgw_function_name, "DropindexWorkerMain");
+    worker.bgw_main_arg     = (Datum) 0;
+
+    RegisterBackgroundWorker(&worker);
+}
+

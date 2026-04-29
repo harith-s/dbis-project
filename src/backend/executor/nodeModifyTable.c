@@ -52,6 +52,9 @@
 
 #include "postgres.h"
 
+#include "../utils/misc/autoindex.h"
+#include "autoindex/pg_autoindex.h"
+
 #include "access/htup_details.h"
 #include "access/tableam.h"
 #include "access/tupconvert.h"
@@ -1284,6 +1287,18 @@ ExecInsert(ModifyTableContext *context,
 	if (canSetTag)
 		(estate->es_processed)++;
 
+	// ---- DROP INDEX TRACKING START ----
+
+	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION)
+	{
+		Oid dboid = MyDatabaseId;
+		Oid reloid = RelationGetRelid(resultRelationDesc);
+
+		dropindex_record_scan(dboid, reloid);
+	}
+
+	// ---- DROP INDEX TRACKING END ----
+
 	/*
 	 * If this insert is the result of a partition key update that moved the
 	 * tuple to a new partition, put this row into the transition NEW TABLE,
@@ -2083,6 +2098,18 @@ ldelete:
 
 	if (canSetTag)
 		(estate->es_processed)++;
+
+	// ---- DROP INDEX TRACKING START ----
+
+	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION)
+	{
+		Oid dboid = MyDatabaseId;
+		Oid reloid = RelationGetRelid(resultRelationDesc);
+
+		dropindex_record_scan(dboid, reloid);
+	}
+
+	// ---- DROP INDEX TRACKING END ----
 
 	/* Tell caller that the delete actually happened. */
 	if (tupleDeleted)
