@@ -261,6 +261,7 @@ DropindexWorkerMain(Datum main_arg)
 
                 SPI_execute(sql, true, 0);
 
+                /* ---- DROP ALL AUTO INDEXES ---- */
                 for (uint64 j = 0; j < SPI_processed; j++)
                 {
                     char *schemaname = SPI_getvalue(SPI_tuptable->vals[j],
@@ -286,6 +287,48 @@ DropindexWorkerMain(Datum main_arg)
                     ereport(LOG,
                             (errmsg("dropindex: dropped index %s.%s",
                                     schemaname, idxname)));
+                }
+
+                /* ---- RESET AUTOINDEX SHMEM ---- */
+                if (AutoindexShmem)
+                {
+                    LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
+
+                    for (int k = 0; k < AutoindexShmem->num_entries; k++)
+                    {
+                        AutoindexEntry *ae = &AutoindexShmem->entries[k];
+
+                        if (ae->in_use &&
+                            ae->dboid == MyDatabaseId &&
+                            ae->reloid == candidates_rel[i])
+                        {
+                            ae->scan_count = 0;
+                            ae->index_triggered = false;
+                        }
+                    }
+
+                    LWLockRelease(&AutoindexShmem->lock.lock);
+                }
+
+                /* ---- RESET DROPINDEX SHMEM ---- */
+                if (DropindexShmem)
+                {
+                    LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+
+                    for (int k = 0; k < DropindexShmem->num_entries; k++)
+                    {
+                        DropindexEntry *de = &DropindexShmem->entries[k];
+
+                        if (de->in_use &&
+                            de->dboid == MyDatabaseId &&
+                            de->reloid == candidates_rel[i])
+                        {
+                            de->update_count = 0;
+                            de->index_dropped = false;
+                        }
+                    }
+
+                    LWLockRelease(&DropindexShmem->lock.lock);
                 }
 
                 SPI_finish();
