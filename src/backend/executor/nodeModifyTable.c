@@ -52,7 +52,6 @@
 
 #include "postgres.h"
 
-#include "../utils/misc/autoindex.h"
 #include "autoindex/pg_autoindex.h"
 
 #include "access/htup_details.h"
