@@ -67,7 +67,7 @@ AutoindexWorkerMain(Datum main_arg)
 
         rc = WaitLatch(MyLatch,
                        WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-                       30000L,
+                       5000L,
                        PG_WAIT_EXTENSION);
         ResetLatch(MyLatch);
         
@@ -135,7 +135,7 @@ AutoindexWorkerMain(Datum main_arg)
                 {
                     snprintf(idxname, sizeof(idxname), "auto_idx_%u_%d", 
                         candidates_rel[i], candidates_att[i]);
-    
+
                     snprintf(sql, sizeof(sql),
                         "CREATE INDEX IF NOT EXISTS %s ON %s.%s (%s)",
                         quote_identifier(idxname),
@@ -194,7 +194,7 @@ DropindexWorkerMain(Datum main_arg)
 
         rc = WaitLatch(MyLatch,
                        WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-                       30000L,
+                       5000L,
                        PG_WAIT_EXTENSION);
         ResetLatch(MyLatch);
 
@@ -312,7 +312,7 @@ DropindexWorkerMain(Datum main_arg)
                         drop_rel[i], drop_att[i]);
 
                 if (relname && schemaname)
-                {
+                {   
                     snprintf(sql, sizeof(sql),
                             "DROP INDEX IF EXISTS %s.%s",
                             quote_identifier(schemaname),

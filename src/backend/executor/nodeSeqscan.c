@@ -333,12 +333,12 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 								double build_cost = DEFAULT_SEQ_PAGE_COST * relpages * 10
 												  + DEFAULT_CPU_TUPLE_COST * tuples * 5;
 
-								ereport(DEBUG1,
-								(errmsg("autoindex scan: rel=%u att=%d total_cost=%.2f "
-										"relpages=%u reltuples=%.0f build_cost=%.2f",
-										relid, var->varattno,
-										node->scan.plan.total_cost,
-										rel->rd_rel->relpages, tuples, build_cost)));
+								// ereport(DEBUG1,
+								// (errmsg("autoindex scan: rel=%u att=%d total_cost=%.2f "
+								// 		"relpages=%u reltuples=%.0f build_cost=%.2f",
+								// 		relid, var->varattno,
+								// 		node->scan.plan.total_cost,
+								// 		rel->rd_rel->relpages, tuples, build_cost)));
 										
 								autoindex_record_scan(MyDatabaseId, relid, var->varattno,
 													  node->scan.plan.total_cost, build_cost);
