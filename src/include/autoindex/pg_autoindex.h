@@ -27,12 +27,16 @@ typedef struct AutoindexEntry {
     bool         in_use;
     bool         index_triggered;
     int64        scan_count;
+    int64_t drop_count;
+    double  accumulated_cost;
+    double  build_cost;
 } AutoindexEntry;
 
 typedef struct DropindexEntry {
     Oid     dboid;
     Oid     reloid;
-    int16   attno;
+    int16   attnums[AUTOINDEX_MAX_COLS];
+    int     ncolumns;
     bool    in_use;
     bool    index_dropped;
     int64   update_count;
@@ -58,7 +62,7 @@ extern const ShmemCallbacks AutoindexShmemCallbacks;
 extern DropindexSharedState *DropindexShmem;
 extern const ShmemCallbacks DropindexShmemCallbacks;
 
-extern void auto_composite_index_record_scan(Oid dboid, Oid reloid, int16 *attnos, int num_attnos);
+extern void auto_composite_index_record_scan(Oid dboid, Oid reloid, int16 *attnos, int num_attnos, Cost scan_count, double build_cost);
 extern void AutoindexRegister(void);
 extern void AutoindexWorkerMain(Datum main_arg);
 

@@ -123,7 +123,6 @@ AutoindexWorkerMain(Datum main_arg)
                 
                 char *relname;
                 char *schemaname;
-                char *colname;
                 char  sql[1024];
                 char  col_list[1024] = "";
                 char  col_idx_name[256] = "";
@@ -137,8 +136,6 @@ AutoindexWorkerMain(Datum main_arg)
                 relname    = get_rel_name(candidates[i].relid);
                 schemaname = get_namespace_name(
                                  get_rel_namespace(candidates[i].relid));
-                colname    = get_attname(candidates[i].relid,
-                                         candidates[i].attnums[0], false);
     
                 /* Build the comma-separated list of column names */
                 for (int j = 0; j < candidates[i].ncolumns; j++)
@@ -152,7 +149,7 @@ AutoindexWorkerMain(Datum main_arg)
                     strlcat(col_list, quote_identifier(colname), sizeof(col_list));
                 }
 
-                if (relname && schemaname && colname)
+                if (relname && schemaname && col_list[0] != '\0')
                 {
 
                     snprintf(idxname, sizeof(idxname), "auto_idx_%u_%s", 
@@ -195,9 +192,11 @@ AutoindexWorkerMain(Datum main_arg)
 void
 DropindexWorkerMain(Datum main_arg)
 {
+    int ndrop = 0;
+    
     pqsignal(SIGHUP, SignalHandlerForConfigReload);
     pqsignal(SIGTERM, dropindex_sigterm);
-
+    
     BackgroundWorkerUnblockSignals();
     BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
@@ -206,8 +205,7 @@ DropindexWorkerMain(Datum main_arg)
     for (;;)
     {
         int   rc;
-        Oid   candidates_rel[DROPINDEX_MAX_ENTRIES];
-        int16 candidates_att[DROPINDEX_MAX_ENTRIES];
+        WorkOrder candidates[DROPINDEX_MAX_ENTRIES];
 
         int   ncandidates = 0;
 
@@ -248,17 +246,16 @@ DropindexWorkerMain(Datum main_arg)
             if (!e->in_use || e->index_dropped || e->dboid != MyDatabaseId)
                 continue;
 
-            candidates_rel[ncandidates] = e->reloid;
-            candidates_att[ncandidates] = e->attno;
+            candidates[ncandidates].relid = e->reloid;
+            candidates[ncandidates].ncolumns = e->ncolumns;
+            memcpy(candidates[ncandidates].attnums, e->attnums, e->ncolumns * sizeof(int16));
             ncandidates++;
         }
 
         LWLockRelease(&DropindexShmem->lock.lock);
 
         /* Pass 2: check scan_benefit from AutoindexShmem, filter actual drop candidates */
-        int ndrop = 0;
-        Oid drop_rel[DROPINDEX_MAX_ENTRIES];
-        int16 drop_att[DROPINDEX_MAX_ENTRIES];
+        WorkOrder drop_rel[DROPINDEX_MAX_ENTRIES];
 
         LWLockAcquire(&AutoindexShmem->lock.lock, LW_SHARED);
 
@@ -268,19 +265,20 @@ DropindexWorkerMain(Datum main_arg)
             {
                 AutoindexEntry *ae = &AutoindexShmem->entries[j];
                 if (ae->in_use && ae->dboid == MyDatabaseId &&
-                    ae->reloid == candidates_rel[i] && ae->attno == candidates_att[i])
+                    ae->key.reloid == candidates[i].relid && ae->key.ncolumns == candidates[i].ncolumns && memcmp(ae->key.attnums, candidates[i].attnums, candidates[i].ncolumns * sizeof(int16)) == 0)
                 {
                     LWLockAcquire(&DropindexShmem->lock.lock, LW_SHARED);
                     for (int k = 0; k < DropindexShmem->num_entries; k++)
                     {
                         DropindexEntry *de = &DropindexShmem->entries[k];
                         if (de->in_use && de->dboid == MyDatabaseId &&
-                            de->reloid == candidates_rel[i] && de->attno == candidates_att[i])
+                            de->reloid == candidates[i].relid && de->ncolumns == candidates[i].ncolumns && memcmp(de->attnums, candidates[i].attnums, candidates[i].ncolumns * sizeof(int16)) == 0)
                         {
                             if (de->maintenance_cost >= ae->accumulated_cost && ae->accumulated_cost > 0)
                             {
-                                drop_rel[ndrop] = candidates_rel[i];
-                                drop_att[ndrop] = candidates_att[i];
+                                drop_rel[ndrop].relid = candidates[i].relid;
+                                drop_rel[ndrop].ncolumns = candidates[i].ncolumns;
+                                memcpy(drop_rel[ndrop].attnums, candidates[i].attnums, candidates[i].ncolumns * sizeof(int16));
                                 ndrop++;
                             }
                             break;
@@ -301,7 +299,7 @@ DropindexWorkerMain(Datum main_arg)
             {
                 DropindexEntry *de = &DropindexShmem->entries[j];
                 if (de->in_use && de->dboid == MyDatabaseId &&
-                    de->reloid == drop_rel[i] && de->attno == drop_att[i])
+                    de->reloid == drop_rel[i].relid && de->ncolumns == drop_rel[i].ncolumns && memcmp(de->attnums, drop_rel[i].attnums, drop_rel[i].ncolumns * sizeof(int16)) == 0)
                 {
                     de->index_dropped = true;
                     break;
@@ -321,19 +319,29 @@ DropindexWorkerMain(Datum main_arg)
                 char idxname[NAMEDATALEN];
                 char *schemaname;
                 char *relname;
+                char col_idx_name[256] = "";
 
                 SetCurrentStatementStartTimestamp();
                 StartTransactionCommand();
                 PushActiveSnapshot(GetTransactionSnapshot());
                 SPI_connect();
 
-                relname    = get_rel_name(drop_rel[i]);
-                schemaname = get_namespace_name(get_rel_namespace(drop_rel[i]));
+                relname    = get_rel_name(drop_rel[i].relid);
+                schemaname = get_namespace_name(get_rel_namespace(drop_rel[i].relid));
 
-                snprintf(idxname, sizeof(idxname), "auto_idx_%u_%d",
-                        drop_rel[i], drop_att[i]);
+                for (int j = 0; j < drop_rel[i].ncolumns; j++)
+                {
+                    char *colname = get_attname(drop_rel[i].relid, drop_rel[i].attnums[j], false);
+                    if (j > 0) {
+                        strlcat(col_idx_name, "_", sizeof(col_idx_name));
+                    }
+                    strlcat(col_idx_name, colname, sizeof(col_idx_name));
+                }
 
-                if (relname && schemaname)
+                snprintf(idxname, sizeof(idxname), "auto_idx_%u_%s",
+                        drop_rel[i].relid, col_idx_name);
+
+                if (relname && schemaname && idxname[0] != '\0')
                 {   
                     snprintf(sql, sizeof(sql),
                             "DROP INDEX IF EXISTS %s.%s",
@@ -355,11 +363,8 @@ DropindexWorkerMain(Datum main_arg)
                     {
                         AutoindexEntry *ae = &AutoindexShmem->entries[k];
                         if (ae->in_use && ae->dboid == MyDatabaseId &&
-                            ae->reloid == drop_rel[i] && ae->attno == drop_att[i])
+                            ae->key.reloid == drop_rel[i].relid && ae->key.ncolumns == drop_rel[i].ncolumns && memcmp(ae->key.attnums, drop_rel[i].attnums, drop_rel[i].ncolumns * sizeof(int16)) == 0)
 
-                        if (ae->in_use &&
-                            ae->dboid == MyDatabaseId &&
-                            ae->key.reloid == candidates_rel[i])
                         {
                             ae->drop_count++;
                             ae->scan_count = 0;
@@ -378,7 +383,7 @@ DropindexWorkerMain(Datum main_arg)
                     {
                         DropindexEntry *de = &DropindexShmem->entries[k];
                         if (de->in_use && de->dboid == MyDatabaseId &&
-                            de->reloid == drop_rel[i] && de->attno == drop_att[i])
+                            de->reloid == drop_rel[i].relid && de->ncolumns == drop_rel[i].ncolumns && memcmp(de->attnums, drop_rel[i].attnums, drop_rel[i].ncolumns * sizeof(int16)) == 0)
                         {
                             de->maintenance_cost = 0;
                             de->index_dropped = false;
@@ -394,11 +399,22 @@ DropindexWorkerMain(Datum main_arg)
             }
             PG_CATCH();
             {
+                char col_idx_name[256] = "";
+
+                for (int j = 0; j < drop_rel[i].ncolumns; j++)
+                {
+                    char *colname = get_attname(drop_rel[i].relid, drop_rel[i].attnums[j], false);
+                    if (j > 0) {
+                        strlcat(col_idx_name, ", ", sizeof(col_idx_name));
+                    }
+                    strlcat(col_idx_name, colname, sizeof(col_idx_name));
+                }
+
                 EmitErrorReport();
                 FlushErrorState();
                 ereport(WARNING,
-                        (errmsg("dropindex: failed for relation %u att %d",
-                                drop_rel[i], drop_att[i])));
+                        (errmsg("dropindex: failed for relation %u attributes %s",
+                                drop_rel[i].relid, col_idx_name)));
                 AbortCurrentTransaction();
             }
             PG_END_TRY();

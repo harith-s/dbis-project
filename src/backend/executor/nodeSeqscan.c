@@ -230,6 +230,7 @@ SeqScanState *
 ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 {
 	SeqScanState *scanstate;
+	double build_cost = 0;
 
 	/*
 	 * Once upon a time it was possible to have an outerPlan of a SeqScan, but
@@ -327,6 +328,25 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                             Var *var = (Var *) left_arg;
                             if (var->varattno > 0) // to skip system cols
                             {
+								Relation rel = scanstate->ss.ss_currentRelation;
+								
+								if (rel->rd_rel->relkind != RELKIND_RELATION){
+									ReleaseSysCache(op_tup);
+									continue;
+								}
+								
+								BlockNumber relpages = RelationGetNumberOfBlocks(rel);
+								
+								if (relpages == 0){
+									ReleaseSysCache(op_tup);
+									continue;
+								}
+								
+								double tuples = (rel->rd_rel->reltuples < 1)
+												? (double) relpages * (BLCKSZ / 100)  /* rough estimate: ~100 bytes/tuple */
+												: rel->rd_rel->reltuples;
+								build_cost = DEFAULT_SEQ_PAGE_COST * relpages * 10
+												  + DEFAULT_CPU_TUPLE_COST * tuples * 5;
 								current_query_attrs[num_attrs++] = var->varattno;
                             }
                         }
@@ -335,11 +355,11 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                 }
             }
         }
-		if (num_attrs > 0) {
+		if (num_attrs > 0 && num_attrs <= AUTOINDEX_MAX_COLS && autoindex_enabled) {
 			Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
 			
 			qsort(current_query_attrs, num_attrs, sizeof(int16), (int (*)(const void *, const void *)) compare_int16);
-			auto_composite_index_record_scan(MyDatabaseId, relid, current_query_attrs, num_attrs);
+			auto_composite_index_record_scan(MyDatabaseId, relid, current_query_attrs, num_attrs, node->scan.plan.total_cost, build_cost);
 		}
     }
 

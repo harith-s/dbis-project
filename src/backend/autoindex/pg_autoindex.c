@@ -67,13 +67,13 @@
   }
 
     void
-    auto_composite_index_record_scan(Oid dboid, Oid reloid, int16 *attnums, int ncolumns)
+    auto_composite_index_record_scan(Oid dboid, Oid reloid, int16 *attnums, int ncolumns, Cost scan_cost, double build_cost)
     {
+        AutoindexEntry *entry = NULL;
         if (reloid < FirstNormalObjectId) return;
         
         LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
 
-        AutoindexEntry *entry = NULL;
         for (int i = 0; i < AutoindexShmem->num_entries; i++)
         {
             AutoindexEntry *e = &AutoindexShmem->entries[i];
@@ -97,11 +97,26 @@
             entry->key.ncolumns = ncolumns;
             memcpy(entry->key.attnums, attnums, ncolumns * sizeof(int16));
             entry->in_use = true;
+            entry->index_triggered = false;
             entry->scan_count = 0;
         }
 
-        entry->scan_count++;
+        entry->build_cost = build_cost; // always update to the latest build cost
+
+        if (!entry->index_triggered){
+            entry->scan_count++;
+            entry->accumulated_cost += scan_cost;
+        }
+
         LWLockRelease(&AutoindexShmem->lock.lock);
+
+        ereport(DEBUG1,
+            (errmsg("autoindex: db=%u rel=%u attnums=%d scan_count=%ld "
+                    "accumulated_cost=%.2f build_cost=%.2f",
+                    dboid, reloid, (int) ncolumns,
+                    (long) entry->scan_count,
+                    entry->accumulated_cost,
+                    entry->build_cost)));
     }
 
 //   void
@@ -170,24 +185,25 @@
     for (int i = 0; i < AutoindexShmem->num_entries; i++)
     {
         AutoindexEntry *ae = &AutoindexShmem->entries[i];
+        DropindexEntry *entry = NULL;
 
-        if (!ae->in_use || ae->dboid != dboid || ae->reloid != reloid)
+        if (!ae->in_use || ae->dboid != dboid || ae->key.reloid != reloid)
             continue;
 
         if (!ae->index_triggered)
             continue;
 
-        // this column has an active auto-index 
-        int16 attno = ae->attno;
+        // // this column has an active auto-index 
+        // int16 attno = ae->attno;
 
         LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
 
-        DropindexEntry *entry = NULL;
         for (int j = 0; j < DropindexShmem->num_entries; j++)
         {
             DropindexEntry *de = &DropindexShmem->entries[j];
             if (de->in_use && de->dboid == dboid &&
-                de->reloid == reloid && de->attno == attno)
+                de->reloid == reloid && de->ncolumns == ae->key.ncolumns &&
+                memcmp(de->attnums, ae->key.attnums, ae->key.ncolumns * sizeof(int16)) == 0)
             {
                 entry = de;
                 break;
@@ -206,7 +222,9 @@
             entry = &DropindexShmem->entries[DropindexShmem->num_entries++];
             entry->dboid            = dboid;
             entry->reloid           = reloid;
-            entry->attno            = attno;
+            // entry->attno            = attno;
+            entry->ncolumns         = ae->key.ncolumns;
+            memcpy(entry->attnums, ae->key.attnums, ae->key.ncolumns * sizeof(int16));
             entry->in_use           = true;
             entry->index_dropped    = false;
             entry->maintenance_cost = 0;
@@ -217,7 +235,7 @@
 
         ereport(DEBUG1,
                 (errmsg("dropindex: db=%u rel=%u att=%d maintenance_cost=%.2f",
-                        dboid, reloid, (int) attno, entry->maintenance_cost)));
+                        dboid, reloid, entry->ncolumns, entry->maintenance_cost)));
 
         LWLockRelease(&DropindexShmem->lock.lock);
     }
