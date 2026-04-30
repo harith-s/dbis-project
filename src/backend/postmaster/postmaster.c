@@ -922,6 +922,7 @@ PostmasterMain(int argc, char *argv[])
 	 * before any modules had a chance to take the background worker slots.
 	 */
 	ApplyLauncherRegister();
+	autoindex_register_gucs();
 	AutoindexRegister();
 	DropindexRegister();
 

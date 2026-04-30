@@ -6,10 +6,12 @@
   #include "miscadmin.h"
   #include "access/transam.h"
   #include "optimizer/cost.h"
+  #include "utils/guc.h"
   #include <math.h>
 
   AutoindexSharedState *AutoindexShmem = NULL;
   DropindexSharedState *DropindexShmem = NULL;
+  bool autoindex_enabled = false;
 
   static void autoindex_shmem_request(void *arg);
   static void autoindex_shmem_init(void *arg);
@@ -191,3 +193,18 @@
 
     LWLockRelease(&AutoindexShmem->lock.lock);
 }
+
+void
+  autoindex_register_gucs(void)
+  {
+      DefineCustomBoolVariable(
+          "autoindex.enabled",
+          "Enable automatic index creation and dropping.",
+          NULL,
+          &autoindex_enabled,
+          false,
+          PGC_SUSET,
+          0,
+          NULL, NULL, NULL
+      );
+  } 

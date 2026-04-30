@@ -47,6 +47,7 @@ typedef struct DropindexSharedState {
     DropindexEntry entries[DROPINDEX_MAX_ENTRIES];
 } DropindexSharedState;
 
+extern bool autoindex_enabled;
 extern AutoindexSharedState *AutoindexShmem;
 extern const ShmemCallbacks AutoindexShmemCallbacks;
 
@@ -60,5 +61,7 @@ extern void AutoindexWorkerMain(Datum main_arg);
 extern void dropindex_record_scan(Oid dboid, Oid reloid, BlockNumber relpages);
 extern void DropindexRegister(void);
 extern void DropindexWorkerMain(Datum main_arg);
+
+extern void autoindex_register_gucs(void);
 
 #endif

@@ -1288,7 +1288,7 @@ ExecInsert(ModifyTableContext *context,
 
 	// ---- DROP INDEX TRACKING START ----
 
-	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION)
+	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION && autoindex_enabled)
 	{
 		Oid dboid = MyDatabaseId;
 		Oid reloid = RelationGetRelid(resultRelationDesc);
@@ -2102,7 +2102,7 @@ ldelete:
 
 	// ---- DROP INDEX TRACKING START ----
 
-	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION)
+	if (resultRelationDesc->rd_rel->relkind == RELKIND_RELATION && autoindex_enabled)
 	{
 		Oid dboid = MyDatabaseId;
 		Oid reloid = RelationGetRelid(resultRelationDesc);

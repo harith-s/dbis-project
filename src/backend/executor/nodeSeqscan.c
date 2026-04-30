@@ -339,9 +339,10 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 								// 		relid, var->varattno,
 								// 		node->scan.plan.total_cost,
 								// 		rel->rd_rel->relpages, tuples, build_cost)));
-										
-								autoindex_record_scan(MyDatabaseId, relid, var->varattno,
-													  node->scan.plan.total_cost, build_cost);
+								if (autoindex_enabled){
+									autoindex_record_scan(MyDatabaseId, relid, var->varattno,
+														node->scan.plan.total_cost, build_cost);
+								}	
                             }
                         }
                     }
