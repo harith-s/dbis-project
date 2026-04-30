@@ -36,6 +36,7 @@
 #include "catalog/pg_operator.h"
 #include "nodes/nodeFuncs.h"
 #include "autoindex/pg_autoindex.h"
+#include "optimizer/cost.h"
 
 static TupleTableSlot *SeqNext(SeqScanState *node);
 
@@ -312,7 +313,35 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                             if (var->varattno > 0) // to skip system cols
                             {
                                 Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
-                                autoindex_record_scan(MyDatabaseId, relid, var->varattno);
+								Relation rel = scanstate->ss.ss_currentRelation;
+
+								if (rel->rd_rel->relkind != RELKIND_RELATION){
+									ReleaseSysCache(op_tup);
+									continue;
+								}
+								
+								BlockNumber relpages = RelationGetNumberOfBlocks(rel);
+								
+								if (relpages == 0){
+									ReleaseSysCache(op_tup);
+									continue;
+								}
+								
+								double tuples = (rel->rd_rel->reltuples < 1)
+												? (double) relpages * (BLCKSZ / 100)  /* rough estimate: ~100 bytes/tuple */
+												: rel->rd_rel->reltuples;
+								double build_cost = DEFAULT_SEQ_PAGE_COST * relpages * 10
+												  + DEFAULT_CPU_TUPLE_COST * tuples * 5;
+
+								ereport(DEBUG1,
+								(errmsg("autoindex scan: rel=%u att=%d total_cost=%.2f "
+										"relpages=%u reltuples=%.0f build_cost=%.2f",
+										relid, var->varattno,
+										node->scan.plan.total_cost,
+										rel->rd_rel->relpages, tuples, build_cost)));
+										
+								autoindex_record_scan(MyDatabaseId, relid, var->varattno,
+													  node->scan.plan.total_cost, build_cost);
                             }
                         }
                     }

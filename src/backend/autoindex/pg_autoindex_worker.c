@@ -97,7 +97,7 @@ AutoindexWorkerMain(Datum main_arg)
             if (e->in_use &&
                 !e->index_triggered &&
                 e->dboid == MyDatabaseId &&
-                e->scan_count >= AUTOINDEX_THRESHOLD)
+                e->accumulated_cost >= e->build_cost * (1 << Min(e->drop_count, 3)))
             {
                 e->index_triggered = true;
                 candidates_rel[ncandidates] = e->reloid;
@@ -185,6 +185,8 @@ DropindexWorkerMain(Datum main_arg)
     {
         int   rc;
         Oid   candidates_rel[DROPINDEX_MAX_ENTRIES];
+        int16 candidates_att[DROPINDEX_MAX_ENTRIES];
+
         int   ncandidates = 0;
 
         if (got_sigterm)
@@ -210,124 +212,153 @@ DropindexWorkerMain(Datum main_arg)
 
         /* collect candidate relations */
         if (!DropindexShmem)
-        {
+        { 
             ereport(FATAL,
                     (errmsg("dropindex worker: shared memory not initialized")));
         }
 
+        /* Pass 1: collect candidates from DropindexShmem */
         LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
-
         for (int i = 0; i < DropindexShmem->num_entries; i++)
         {
             DropindexEntry *e = &DropindexShmem->entries[i];
 
-            if (e->in_use &&
-                !e->index_dropped &&
-                e->dboid == MyDatabaseId &&
-                e->update_count >= DROPINDEX_THRESHOLD)
-            {
-                e->index_dropped = true;
-                candidates_rel[ncandidates++] = e->reloid;
-            }
+            if (!e->in_use || e->index_dropped || e->dboid != MyDatabaseId)
+                continue;
+
+            candidates_rel[ncandidates] = e->reloid;
+            candidates_att[ncandidates] = e->attno;
+            ncandidates++;
         }
 
         LWLockRelease(&DropindexShmem->lock.lock);
 
-        /* process each relation */
+        /* Pass 2: check scan_benefit from AutoindexShmem, filter actual drop candidates */
+        int ndrop = 0;
+        Oid drop_rel[DROPINDEX_MAX_ENTRIES];
+        int16 drop_att[DROPINDEX_MAX_ENTRIES];
+
+        LWLockAcquire(&AutoindexShmem->lock.lock, LW_SHARED);
+
         for (int i = 0; i < ncandidates; i++)
+        {
+            for (int j = 0; j < AutoindexShmem->num_entries; j++)
+            {
+                AutoindexEntry *ae = &AutoindexShmem->entries[j];
+                if (ae->in_use && ae->dboid == MyDatabaseId &&
+                    ae->reloid == candidates_rel[i] && ae->attno == candidates_att[i])
+                {
+                    LWLockAcquire(&DropindexShmem->lock.lock, LW_SHARED);
+                    for (int k = 0; k < DropindexShmem->num_entries; k++)
+                    {
+                        DropindexEntry *de = &DropindexShmem->entries[k];
+                        if (de->in_use && de->dboid == MyDatabaseId &&
+                            de->reloid == candidates_rel[i] && de->attno == candidates_att[i])
+                        {
+                            if (de->maintenance_cost >= ae->accumulated_cost && ae->accumulated_cost > 0)
+                            {
+                                drop_rel[ndrop] = candidates_rel[i];
+                                drop_att[ndrop] = candidates_att[i];
+                                ndrop++;
+                            }
+                            break;
+                        }
+                    }
+                    LWLockRelease(&DropindexShmem->lock.lock);
+                    break;
+                }
+            }
+        }
+        LWLockRelease(&AutoindexShmem->lock.lock);
+        
+        /* mark confirmed drops in DropindexShmem */
+        LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+        for (int i = 0; i < ndrop; i++)
+        {
+            for (int j = 0; j < DropindexShmem->num_entries; j++)
+            {
+                DropindexEntry *de = &DropindexShmem->entries[j];
+                if (de->in_use && de->dboid == MyDatabaseId &&
+                    de->reloid == drop_rel[i] && de->attno == drop_att[i])
+                {
+                    de->index_dropped = true;
+                    break;
+                }
+            }
+        }
+        LWLockRelease(&DropindexShmem->lock.lock);
+
+        for (int i = 0; i < ndrop; i++)
         {
             if (got_sigterm)
                 proc_exit(0);
 
             PG_TRY();
             {
-                char sql[1024];
+                char sql[512];
+                char idxname[NAMEDATALEN];
+                char *schemaname;
+                char *relname;
 
                 SetCurrentStatementStartTimestamp();
                 StartTransactionCommand();
                 PushActiveSnapshot(GetTransactionSnapshot());
                 SPI_connect();
 
-                /*
-                 * Fetch all indexes on this table with schema
-                 */
-                snprintf(sql, sizeof(sql),
-                         "SELECT n.nspname, c.relname "
-                         "FROM pg_index i "
-                         "JOIN pg_class c ON c.oid = i.indexrelid "
-                         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                         "WHERE i.indrelid = %u",
-                         candidates_rel[i]);
+                relname    = get_rel_name(drop_rel[i]);
+                schemaname = get_namespace_name(get_rel_namespace(drop_rel[i]));
 
-                SPI_execute(sql, true, 0);
+                snprintf(idxname, sizeof(idxname), "auto_idx_%u_%d",
+                        drop_rel[i], drop_att[i]);
 
-                /* ---- DROP ALL AUTO INDEXES ---- */
-                for (uint64 j = 0; j < SPI_processed; j++)
+                if (relname && schemaname)
                 {
-                    char *schemaname = SPI_getvalue(SPI_tuptable->vals[j],
-                                                    SPI_tuptable->tupdesc, 1);
-                    char *idxname = SPI_getvalue(SPI_tuptable->vals[j],
-                                                 SPI_tuptable->tupdesc, 2);
+                    snprintf(sql, sizeof(sql),
+                            "DROP INDEX IF EXISTS %s.%s",
+                            quote_identifier(schemaname),
+                            quote_identifier(idxname));
 
-                    if (!schemaname || !idxname)
-                        continue;
-
-                    /* only drop auto-created indexes */
-                    if (strncmp(idxname, "auto_idx_", 9) != 0)
-                        continue;
-
-                    char dropsql[512];
-                    snprintf(dropsql, sizeof(dropsql),
-                             "DROP INDEX IF EXISTS %s.%s",
-                             quote_identifier(schemaname),
-                             quote_identifier(idxname));
-
-                    SPI_execute(dropsql, false, 0);
+                    SPI_execute(sql, false, 0);
 
                     ereport(LOG,
                             (errmsg("dropindex: dropped index %s.%s",
                                     schemaname, idxname)));
                 }
 
-                /* ---- RESET AUTOINDEX SHMEM ---- */
+                
                 if (AutoindexShmem)
                 {
                     LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
-
                     for (int k = 0; k < AutoindexShmem->num_entries; k++)
                     {
                         AutoindexEntry *ae = &AutoindexShmem->entries[k];
-
-                        if (ae->in_use &&
-                            ae->dboid == MyDatabaseId &&
-                            ae->reloid == candidates_rel[i])
+                        if (ae->in_use && ae->dboid == MyDatabaseId &&
+                            ae->reloid == drop_rel[i] && ae->attno == drop_att[i])
                         {
+                            ae->drop_count++;
                             ae->scan_count = 0;
+                            ae->accumulated_cost = 0;
                             ae->index_triggered = false;
+                            break;
                         }
                     }
-
                     LWLockRelease(&AutoindexShmem->lock.lock);
                 }
 
-                /* ---- RESET DROPINDEX SHMEM ---- */
                 if (DropindexShmem)
                 {
                     LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
-
                     for (int k = 0; k < DropindexShmem->num_entries; k++)
                     {
                         DropindexEntry *de = &DropindexShmem->entries[k];
-
-                        if (de->in_use &&
-                            de->dboid == MyDatabaseId &&
-                            de->reloid == candidates_rel[i])
+                        if (de->in_use && de->dboid == MyDatabaseId &&
+                            de->reloid == drop_rel[i] && de->attno == drop_att[i])
                         {
-                            de->update_count = 0;
+                            de->maintenance_cost = 0;
                             de->index_dropped = false;
+                            break;
                         }
                     }
-
                     LWLockRelease(&DropindexShmem->lock.lock);
                 }
 
@@ -339,11 +370,9 @@ DropindexWorkerMain(Datum main_arg)
             {
                 EmitErrorReport();
                 FlushErrorState();
-
                 ereport(WARNING,
-                        (errmsg("dropindex: failed for relation %u",
-                                candidates_rel[i])));
-
+                        (errmsg("dropindex: failed for relation %u att %d",
+                                drop_rel[i], drop_att[i])));
                 AbortCurrentTransaction();
             }
             PG_END_TRY();

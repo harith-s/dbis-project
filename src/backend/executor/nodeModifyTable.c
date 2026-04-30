@@ -1293,7 +1293,9 @@ ExecInsert(ModifyTableContext *context,
 		Oid dboid = MyDatabaseId;
 		Oid reloid = RelationGetRelid(resultRelationDesc);
 
-		dropindex_record_scan(dboid, reloid);
+		BlockNumber relpages = RelationGetNumberOfBlocks(resultRelationDesc);
+
+		dropindex_record_scan(dboid, reloid, relpages);
 	}
 
 	// ---- DROP INDEX TRACKING END ----
@@ -2105,7 +2107,9 @@ ldelete:
 		Oid dboid = MyDatabaseId;
 		Oid reloid = RelationGetRelid(resultRelationDesc);
 
-		dropindex_record_scan(dboid, reloid);
+		BlockNumber relpages = RelationGetNumberOfBlocks(resultRelationDesc);
+
+		dropindex_record_scan(dboid, reloid, relpages);
 	}
 
 	// ---- DROP INDEX TRACKING END ----

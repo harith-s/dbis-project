@@ -5,6 +5,8 @@
   #include "storage/subsystems.h"
   #include "miscadmin.h"
   #include "access/transam.h"
+  #include "optimizer/cost.h"
+  #include <math.h>
 
   AutoindexSharedState *AutoindexShmem = NULL;
   DropindexSharedState *DropindexShmem = NULL;
@@ -63,7 +65,7 @@
   }
 
   void
-  autoindex_record_scan(Oid dboid, Oid reloid, int16 attno)
+  autoindex_record_scan(Oid dboid, Oid reloid, int16 attno, Cost scan_cost, double build_cost)
   {
       if (reloid < FirstNormalObjectId)
           return;
@@ -105,63 +107,87 @@
           entry->index_triggered = false;
           entry->scan_count      = 0;
       }
+      entry->build_cost = build_cost; // always update to the latest build cost
 
-      if (!entry->index_triggered)
+      if (!entry->index_triggered){
           entry->scan_count++;
+          entry->accumulated_cost += scan_cost;
+      }
 
       LWLockRelease(&AutoindexShmem->lock.lock);
 
       ereport(DEBUG1,
-              (errmsg("autoindex: db=%u rel=%u att=%d count=%ld",
-                      dboid, reloid, (int) attno, (long) entry->scan_count)));
+        (errmsg("autoindex: db=%u rel=%u att=%d scan_count=%ld "
+                "accumulated_cost=%.2f build_cost=%.2f",
+                dboid, reloid, (int) attno,
+                (long) entry->scan_count,
+                entry->accumulated_cost,
+                entry->build_cost)));
   }
 
-  void dropindex_record_scan(Oid dboid, Oid reloid) {
-      if (reloid < FirstNormalObjectId)
-          return;
-      int i;
-      DropindexEntry *entry = NULL;
-
-      if (!DropindexShmem)
+  void dropindex_record_scan(Oid dboid, Oid reloid, BlockNumber relpages) {
+    if (reloid < FirstNormalObjectId)
           return;
 
-      LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+    if (!DropindexShmem)
+        return;
 
-      for (i = 0; i < DropindexShmem->num_entries; i++)
-      {
-          DropindexEntry *e = &DropindexShmem->entries[i];
-          if (e->in_use &&
-              e->dboid  == dboid &&
-              e->reloid == reloid)
-          {
-              entry = e;
-              break;
-          }
-      }
+    LWLockAcquire(&AutoindexShmem->lock.lock, LW_SHARED);
 
-      if (!entry)
-      {
-          if (DropindexShmem->num_entries >= DROPINDEX_MAX_ENTRIES)
-          {
-              LWLockRelease(&DropindexShmem->lock.lock);
-              ereport(WARNING,
-                      (errmsg("dropindex: shmem table full, dropping entry")));
-              return;
-          }
-          entry = &DropindexShmem->entries[DropindexShmem->num_entries++];
-          entry->dboid           = dboid;
-          entry->reloid          = reloid;
-          entry->in_use          = true;
-          entry->index_dropped = false;
-          entry->update_count      = 0;
-      }
+    for (int i = 0; i < AutoindexShmem->num_entries; i++)
+    {
+        AutoindexEntry *ae = &AutoindexShmem->entries[i];
 
-      if (!entry->index_dropped)
-          entry->update_count++;
+        if (!ae->in_use || ae->dboid != dboid || ae->reloid != reloid)
+            continue;
 
-      LWLockRelease(&DropindexShmem->lock.lock);
+        if (!ae->index_triggered)
+            continue;
 
-      ereport(DEBUG1,
-              (errmsg("dropindex: db=%u rel=%u count=%ld",
-                      dboid, reloid, (long) entry->update_count)));
-  }
+        // this column has an active auto-index 
+        int16 attno = ae->attno;
+
+        LWLockAcquire(&DropindexShmem->lock.lock, LW_EXCLUSIVE);
+
+        DropindexEntry *entry = NULL;
+        for (int j = 0; j < DropindexShmem->num_entries; j++)
+        {
+            DropindexEntry *de = &DropindexShmem->entries[j];
+            if (de->in_use && de->dboid == dboid &&
+                de->reloid == reloid && de->attno == attno)
+            {
+                entry = de;
+                break;
+            }
+        }
+
+        if (!entry)
+        {
+            if (DropindexShmem->num_entries >= DROPINDEX_MAX_ENTRIES)
+            {
+                LWLockRelease(&DropindexShmem->lock.lock);
+                ereport(WARNING,
+                        (errmsg("dropindex: shmem table full")));
+                continue;
+            }
+            entry = &DropindexShmem->entries[DropindexShmem->num_entries++];
+            entry->dboid            = dboid;
+            entry->reloid           = reloid;
+            entry->attno            = attno;
+            entry->in_use           = true;
+            entry->index_dropped    = false;
+            entry->maintenance_cost = 0;
+        }
+
+        if (!entry->index_dropped)
+            entry->maintenance_cost += DEFAULT_RANDOM_PAGE_COST * (1 + log(Max(relpages, 1)));
+
+        ereport(DEBUG1,
+                (errmsg("dropindex: db=%u rel=%u att=%d maintenance_cost=%.2f",
+                        dboid, reloid, (int) attno, entry->maintenance_cost)));
+
+        LWLockRelease(&DropindexShmem->lock.lock);
+    }
+
+    LWLockRelease(&AutoindexShmem->lock.lock);
+}
