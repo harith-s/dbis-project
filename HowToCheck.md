@@ -79,7 +79,7 @@ FROM generate_series(1, 1000) g;
 ## 8. Trigger Sequential Scan (Auto Indexing)
 
 ```sql
-SELECT * FROM auto_test WHERE user_id = 500;
+SELECT * FROM auto_test WHERE user_id = 500 and username = 'user_500';
 ```
 
 ---

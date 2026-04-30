@@ -38,6 +38,19 @@
 #include "autoindex/pg_autoindex.h"
 #include "optimizer/cost.h"
 
+static int
+compare_int16(const void *a, const void *b)
+{
+    int16 arg1 = *(const int16 *) a;
+    int16 arg2 = *(const int16 *) b;
+
+    if (arg1 < arg2)
+        return -1;
+    if (arg1 > arg2)
+        return 1;
+    return 0;
+}
+
 static TupleTableSlot *SeqNext(SeqScanState *node);
 
 /* ----------------------------------------------------------------
@@ -289,6 +302,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	if (node->scan.plan.qual != NIL)
     {
         ListCell   *lc;
+		int16 current_query_attrs[AUTOINDEX_MAX_COLS];
+		int num_attrs = 0;
 
         foreach(lc, node->scan.plan.qual)
         {
@@ -312,37 +327,7 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                             Var *var = (Var *) left_arg;
                             if (var->varattno > 0) // to skip system cols
                             {
-                                Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
-								Relation rel = scanstate->ss.ss_currentRelation;
-
-								if (rel->rd_rel->relkind != RELKIND_RELATION){
-									ReleaseSysCache(op_tup);
-									continue;
-								}
-								
-								BlockNumber relpages = RelationGetNumberOfBlocks(rel);
-								
-								if (relpages == 0){
-									ReleaseSysCache(op_tup);
-									continue;
-								}
-								
-								double tuples = (rel->rd_rel->reltuples < 1)
-												? (double) relpages * (BLCKSZ / 100)  /* rough estimate: ~100 bytes/tuple */
-												: rel->rd_rel->reltuples;
-								double build_cost = DEFAULT_SEQ_PAGE_COST * relpages * 10
-												  + DEFAULT_CPU_TUPLE_COST * tuples * 5;
-
-								// ereport(DEBUG1,
-								// (errmsg("autoindex scan: rel=%u att=%d total_cost=%.2f "
-								// 		"relpages=%u reltuples=%.0f build_cost=%.2f",
-								// 		relid, var->varattno,
-								// 		node->scan.plan.total_cost,
-								// 		rel->rd_rel->relpages, tuples, build_cost)));
-								if (autoindex_enabled){
-									autoindex_record_scan(MyDatabaseId, relid, var->varattno,
-														node->scan.plan.total_cost, build_cost);
-								}	
+								current_query_attrs[num_attrs++] = var->varattno;
                             }
                         }
                     }
@@ -350,7 +335,14 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                 }
             }
         }
+		if (num_attrs > 0) {
+			Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
+			
+			qsort(current_query_attrs, num_attrs, sizeof(int16), (int (*)(const void *, const void *)) compare_int16);
+			auto_composite_index_record_scan(MyDatabaseId, relid, current_query_attrs, num_attrs);
+		}
     }
+
 
 	return scanstate;
 }

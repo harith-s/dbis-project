@@ -66,66 +66,97 @@
       memset(DropindexShmem->entries, 0, sizeof(DropindexShmem->entries));
   }
 
-  void
-  autoindex_record_scan(Oid dboid, Oid reloid, int16 attno, Cost scan_cost, double build_cost)
-  {
-      if (reloid < FirstNormalObjectId)
-          return;
-      int i;
-      AutoindexEntry *entry = NULL;
+    void
+    auto_composite_index_record_scan(Oid dboid, Oid reloid, int16 *attnums, int ncolumns)
+    {
+        if (reloid < FirstNormalObjectId) return;
+        
+        LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
 
-      if (!AutoindexShmem)
-          return;
+        AutoindexEntry *entry = NULL;
+        for (int i = 0; i < AutoindexShmem->num_entries; i++)
+        {
+            AutoindexEntry *e = &AutoindexShmem->entries[i];
+            /* Match DB, Relation, and the exact set of columns */
+            if (e->in_use && e->dboid == dboid && e->key.reloid == reloid && e->key.ncolumns == ncolumns)
+            {
+                if (memcmp(e->key.attnums, attnums, ncolumns * sizeof(int16)) == 0)
+                {
+                    entry = e;
+                    break;
+                }
+            }
+        }
 
-      LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
+        if (!entry)
+        {
+            /* ... existing logic to handle shmem full ... */
+            entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
+            entry->dboid = dboid;
+            entry->key.reloid = reloid;
+            entry->key.ncolumns = ncolumns;
+            memcpy(entry->key.attnums, attnums, ncolumns * sizeof(int16));
+            entry->in_use = true;
+            entry->scan_count = 0;
+        }
 
-      for (i = 0; i < AutoindexShmem->num_entries; i++)
-      {
-          AutoindexEntry *e = &AutoindexShmem->entries[i];
-          if (e->in_use &&
-              e->dboid  == dboid &&
-              e->reloid == reloid &&
-              e->attno  == attno)
-          {
-              entry = e;
-              break;
-          }
-      }
+        entry->scan_count++;
+        LWLockRelease(&AutoindexShmem->lock.lock);
+    }
 
-      if (!entry)
-      {
-          if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
-          {
-              LWLockRelease(&AutoindexShmem->lock.lock);
-              ereport(WARNING,
-                      (errmsg("autoindex: shmem table full, dropping entry")));
-              return;
-          }
-          entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
-          entry->dboid           = dboid;
-          entry->reloid          = reloid;
-          entry->attno           = attno;
-          entry->in_use          = true;
-          entry->index_triggered = false;
-          entry->scan_count      = 0;
-      }
-      entry->build_cost = build_cost; // always update to the latest build cost
+//   void
+//   autoindex_record_scan(Oid dboid, Oid reloid, int16 attno)
+//   {
+//       if (reloid < FirstNormalObjectId)
+//           return;
+//       int i;
+//       AutoindexEntry *entry = NULL;
 
-      if (!entry->index_triggered){
-          entry->scan_count++;
-          entry->accumulated_cost += scan_cost;
-      }
+//       if (!AutoindexShmem)
+//           return;
 
-      LWLockRelease(&AutoindexShmem->lock.lock);
+//       LWLockAcquire(&AutoindexShmem->lock.lock, LW_EXCLUSIVE);
 
-      ereport(DEBUG1,
-        (errmsg("autoindex: db=%u rel=%u att=%d scan_count=%ld "
-                "accumulated_cost=%.2f build_cost=%.2f",
-                dboid, reloid, (int) attno,
-                (long) entry->scan_count,
-                entry->accumulated_cost,
-                entry->build_cost)));
-  }
+//       for (i = 0; i < AutoindexShmem->num_entries; i++)
+//       {
+//           AutoindexEntry *e = &AutoindexShmem->entries[i];
+//           if (e->in_use &&
+//               e->dboid  == dboid &&
+//               e->reloid == reloid &&
+//               e->attno  == attno)
+//           {
+//               entry = e;
+//               break;
+//           }
+//       }
+
+//       if (!entry)
+//       {
+//           if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
+//           {
+//               LWLockRelease(&AutoindexShmem->lock.lock);
+//               ereport(WARNING,
+//                       (errmsg("autoindex: shmem table full, dropping entry")));
+//               return;
+//           }
+//           entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
+//           entry->dboid           = dboid;
+//           entry->reloid          = reloid;
+//           entry->attno           = attno;
+//           entry->in_use          = true;
+//           entry->index_triggered = false;
+//           entry->scan_count      = 0;
+//       }
+
+//       if (!entry->index_triggered)
+//           entry->scan_count++;
+
+//       LWLockRelease(&AutoindexShmem->lock.lock);
+
+//       ereport(DEBUG1,
+//               (errmsg("autoindex: db=%u rel=%u att=%d count=%ld",
+//                       dboid, reloid, (int) attno, (long) entry->scan_count)));
+//   }
 
   void dropindex_record_scan(Oid dboid, Oid reloid, BlockNumber relpages) {
     if (reloid < FirstNormalObjectId)
