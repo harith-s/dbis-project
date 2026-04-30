@@ -37,6 +37,19 @@
 #include "nodes/nodeFuncs.h"
 #include "autoindex/pg_autoindex.h"
 
+static int
+compare_int16(const void *a, const void *b)
+{
+    int16 arg1 = *(const int16 *) a;
+    int16 arg2 = *(const int16 *) b;
+
+    if (arg1 < arg2)
+        return -1;
+    if (arg1 > arg2)
+        return 1;
+    return 0;
+}
+
 static TupleTableSlot *SeqNext(SeqScanState *node);
 
 /* ----------------------------------------------------------------
@@ -288,6 +301,8 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
 	if (node->scan.plan.qual != NIL)
     {
         ListCell   *lc;
+		int16 current_query_attrs[AUTOINDEX_MAX_COLS];
+		int num_attrs = 0;
 
         foreach(lc, node->scan.plan.qual)
         {
@@ -311,8 +326,7 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                             Var *var = (Var *) left_arg;
                             if (var->varattno > 0) // to skip system cols
                             {
-                                Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
-                                autoindex_record_scan(MyDatabaseId, relid, var->varattno);
+								current_query_attrs[num_attrs++] = var->varattno;
                             }
                         }
                     }
@@ -320,7 +334,14 @@ ExecInitSeqScan(SeqScan *node, EState *estate, int eflags)
                 }
             }
         }
+		if (num_attrs > 0) {
+			Oid relid = RelationGetRelid(scanstate->ss.ss_currentRelation);
+			
+			qsort(current_query_attrs, num_attrs, sizeof(int16), (int (*)(const void *, const void *)) compare_int16);
+			auto_composite_index_record_scan(MyDatabaseId, relid, current_query_attrs, num_attrs);
+		}
     }
+
 
 	return scanstate;
 }

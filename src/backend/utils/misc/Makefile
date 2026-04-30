@@ -32,8 +32,7 @@ OBJS = \
 	stack_depth.o \
 	superuser.o \
 	timeout.o \
-	tzparser.o \
-	autoindex.o
+	tzparser.o 
 
 # This location might depend on the installation directories. Therefore
 # we can't substitute it into pg_config.h.

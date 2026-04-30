@@ -14,6 +14,12 @@
 #include "pgstat.h" 
 #include "utils/guc.h"
 
+typedef struct {
+    Oid   relid;
+    int16 attnums[AUTOINDEX_MAX_COLS];
+    int   ncolumns;
+} WorkOrder;
+
 void AutoindexWorkerMain(Datum main_arg);
 void AutoindexRegister(void);
 
@@ -57,8 +63,8 @@ AutoindexWorkerMain(Datum main_arg)
     for (;;)
     {
         int   rc;
-        Oid   candidates_rel[AUTOINDEX_MAX_ENTRIES];
-        int16 candidates_att[AUTOINDEX_MAX_ENTRIES];
+        
+        WorkOrder candidates[AUTOINDEX_MAX_ENTRIES];
         int   ncandidates = 0;
         int   i;
 
@@ -100,8 +106,9 @@ AutoindexWorkerMain(Datum main_arg)
                 e->scan_count >= AUTOINDEX_THRESHOLD)
             {
                 e->index_triggered = true;
-                candidates_rel[ncandidates] = e->reloid;
-                candidates_att[ncandidates] = e->attno;
+                candidates[ncandidates].relid = e->key.reloid;
+                candidates[ncandidates].ncolumns = e->key.ncolumns;
+                memcpy(candidates[ncandidates].attnums, e->key.attnums, e->key.ncolumns * sizeof(int16));
                 ncandidates++;
             }
         }
@@ -118,6 +125,8 @@ AutoindexWorkerMain(Datum main_arg)
                 char *schemaname;
                 char *colname;
                 char  sql[1024];
+                char  col_list[1024] = "";
+                char  col_idx_name[256] = "";
                 char  idxname[NAMEDATALEN];
     
                 SetCurrentStatementStartTimestamp();
@@ -125,29 +134,42 @@ AutoindexWorkerMain(Datum main_arg)
                 PushActiveSnapshot(GetTransactionSnapshot());
                 SPI_connect();
     
-                relname    = get_rel_name(candidates_rel[i]);
+                relname    = get_rel_name(candidates[i].relid);
                 schemaname = get_namespace_name(
-                                 get_rel_namespace(candidates_rel[i]));
-                colname    = get_attname(candidates_rel[i],
-                                         candidates_att[i], false);
+                                 get_rel_namespace(candidates[i].relid));
+                colname    = get_attname(candidates[i].relid,
+                                         candidates[i].attnums[0], false);
     
+                /* Build the comma-separated list of column names */
+                for (int j = 0; j < candidates[i].ncolumns; j++)
+                {
+                    char *colname = get_attname(candidates[i].relid, candidates[i].attnums[j], false);
+                    if (j > 0) {
+                        strlcat(col_idx_name, "_", sizeof(col_idx_name));
+                        strlcat(col_list, ", ", sizeof(col_list));
+                    }
+                    strlcat(col_idx_name, colname, sizeof(col_idx_name));
+                    strlcat(col_list, quote_identifier(colname), sizeof(col_list));
+                }
+
                 if (relname && schemaname && colname)
                 {
-                    snprintf(idxname, sizeof(idxname), "auto_idx_%u_%d", 
-                        candidates_rel[i], candidates_att[i]);
+
+                    snprintf(idxname, sizeof(idxname), "auto_idx_%u_%s", 
+                        candidates[i].relid, col_idx_name);
     
                     snprintf(sql, sizeof(sql),
                         "CREATE INDEX IF NOT EXISTS %s ON %s.%s (%s)",
                         quote_identifier(idxname),
                         quote_identifier(schemaname),
                         quote_identifier(relname),
-                        quote_identifier(colname));
+                        col_list);
     
                     SPI_execute(sql, false, 0);
     
                     ereport(LOG,
                             (errmsg("autoindex: created index on %s.%s(%s)",
-                                    schemaname, relname, colname)));
+                                    schemaname, relname, col_list)));
                 }
     
                 SPI_finish();
@@ -161,7 +183,7 @@ AutoindexWorkerMain(Datum main_arg)
 
                 ereport(WARNING,
                         (errmsg("autoindex: failed to create index for relation %u", 
-                                candidates_rel[i])));
+                                candidates[i].relid)));
 
                 AbortCurrentTransaction();
             }
@@ -300,7 +322,7 @@ DropindexWorkerMain(Datum main_arg)
 
                         if (ae->in_use &&
                             ae->dboid == MyDatabaseId &&
-                            ae->reloid == candidates_rel[i])
+                            ae->key.reloid == candidates_rel[i])
                         {
                             ae->scan_count = 0;
                             ae->index_triggered = false;
