@@ -161,7 +161,7 @@
                 }
 
                 ereport(DEBUG1,
-                    (errmsg("autoindex: db=%u rel=%u attnums=%d scan_count=%ld "
+                    (errmsg("autoindex: db=%u rel=%u attno=%d scan_count=%ld "
                             "accumulated_cost=%.2f build_cost=%.2f",
                             dboid, reloid, (int) single_att,
                             (long) s_entry->scan_count,
@@ -172,10 +172,26 @@
 
         LWLockRelease(&AutoindexShmem->lock.lock);
 
+        char att_buf[1024];
+        int  pos = 0;
+
+        att_buf[0] = '\0';
+        for (int i = 0; i < ncolumns; i++)
+        {
+            /* Append the attribute number and a comma if not the last one */
+            pos += snprintf(att_buf + pos, sizeof(att_buf) - pos, "%d%s",
+                            (int) entry->key.attnums[i],
+                            (i < ncolumns - 1) ? ", " : "");
+            
+            /* Safety check to prevent buffer overflow */
+            if (pos >= sizeof(att_buf))
+                break;
+        }
+
         ereport(DEBUG1,
-            (errmsg("autoindex: db=%u rel=%u attnums=%d scan_count=%ld "
+            (errmsg("autoindex: db=%u rel=%u atts=[%s] count=%d scan_count=%ld "
                     "accumulated_cost=%.2f build_cost=%.2f",
-                    dboid, reloid, (int) ncolumns,
+                    dboid, reloid, att_buf, (int) ncolumns,
                     (long) entry->scan_count,
                     entry->accumulated_cost,
                     entry->build_cost)));
