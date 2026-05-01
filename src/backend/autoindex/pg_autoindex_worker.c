@@ -192,22 +192,22 @@ AutoindexWorkerMain(Datum main_arg)
 void
 DropindexWorkerMain(Datum main_arg)
 {
-    int ndrop = 0;
     
     pqsignal(SIGHUP, SignalHandlerForConfigReload);
     pqsignal(SIGTERM, dropindex_sigterm);
     
     BackgroundWorkerUnblockSignals();
     BackgroundWorkerInitializeConnection("postgres", NULL, 0);
-
+    
     ereport(LOG, (errmsg("dropindex worker started")));
-
+    
     for (;;)
     {
         int   rc;
         WorkOrder candidates[DROPINDEX_MAX_ENTRIES];
-
+        
         int   ncandidates = 0;
+        int ndrop = 0;
 
         if (got_sigterm)
             proc_exit(0);
