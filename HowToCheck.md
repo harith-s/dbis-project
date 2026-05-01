@@ -47,47 +47,13 @@ mkdir ~/custom_data
 
 ---
 
-## 5. Create Test Table
+## 5. Run Test Queries
 
-```sql
-CREATE TABLE auto_test (
-    user_id INT,
-    username TEXT
-);
-```
+Open the testcases1.md file and execute the SQL commands there to see the auto-indexing in action. You can also monitor the log file in real-time to observe when indexes are created or dropped.
 
----
-
-## 6. Insert Sample Data
-
-```sql
-INSERT INTO auto_test (user_id, username)
-SELECT g, 'user_' || g
-FROM generate_series(1, 1000) g;
-```
-
----
-
-## 7. Verify Table
-
-```sql
-\d auto_test
-```
-
----
-
-## 8. Trigger Sequential Scan (Auto Indexing)
-
-```sql
-SELECT * FROM auto_test WHERE user_id = 500 and username = 'user_500';
-```
-
----
-
-## 9. Check Index Creation
-
-```sql
-\d auto_test
+```bash
+# In another terminal, watch the log file for changes
+watch tail ~/custom_postgres.log
 ```
 
 ---

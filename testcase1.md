@@ -3,6 +3,7 @@ drop table auto_test;
 CREATE TABLE auto_test (user_id INT, username TEXT);
   INSERT INTO auto_test SELECT i, 'user_' || i FROM generate_series(1, 10000) i;
   SET log_min_messages = DEBUG1;
+  SET autoindex.enabled = TRUE;
 
   SELECT * FROM auto_test WHERE user_id = 42; -> 6 times roughly
 
