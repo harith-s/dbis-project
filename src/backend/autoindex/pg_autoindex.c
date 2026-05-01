@@ -108,7 +108,7 @@
             entry->scan_count = 0;
         }
 
-        entry->build_cost = build_cost; // always update to the latest build cost
+        entry->build_cost = n * build_cost; // always update to the latest build cost
 
         if (!entry->index_triggered){
             entry->scan_count++;
@@ -152,7 +152,7 @@
                     s_entry->accumulated_cost = 0;
                 }
                 
-                s_entry->build_cost = build_cost / ncolumns; 
+                s_entry->build_cost = build_cost; 
                 
                 if (!s_entry->index_triggered)
                 {
