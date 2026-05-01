@@ -90,7 +90,14 @@
 
         if (!entry)
         {
-            /* ... existing logic to handle shmem full ... */
+            if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
+            {
+                LWLockRelease(&AutoindexShmem->lock.lock);
+                ereport(WARNING,
+                        (errmsg("autoindex: shmem table full, dropping entry")));
+                return;
+            }
+
             entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
             entry->dboid = dboid;
             entry->key.reloid = reloid;
@@ -106,6 +113,61 @@
         if (!entry->index_triggered){
             entry->scan_count++;
             entry->accumulated_cost += scan_cost;
+        }
+
+        if (ncolumns > 1) {
+            for (int i = 0; i < ncolumns; i++) {
+                int16 single_att = attnums[i];
+                AutoindexEntry *s_entry = NULL;
+
+                for (int j = 0; j < AutoindexShmem->num_entries; j++)
+                {
+                    AutoindexEntry *e = &AutoindexShmem->entries[j];
+                    if (e->in_use && e->dboid == dboid && 
+                        e->key.reloid == reloid && e->key.ncolumns == 1 &&
+                        e->key.attnums[0] == single_att)
+                    {
+                        s_entry = e;
+                        break;
+                    }
+                }
+
+                if (!s_entry) {
+                    if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
+                    {
+                        LWLockRelease(&AutoindexShmem->lock.lock);
+                        ereport(WARNING,
+                                (errmsg("autoindex: shmem table full, dropping entry")));
+                        return;
+                    }
+
+                    s_entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
+                    s_entry->dboid = dboid;
+                    s_entry->key.reloid = reloid;
+                    s_entry->key.ncolumns = 1;
+                    s_entry->key.attnums[0] = single_att;
+                    s_entry->in_use = true;
+                    s_entry->index_triggered = false;
+                    s_entry->scan_count = 0;
+                    s_entry->accumulated_cost = 0;
+                }
+                
+                s_entry->build_cost = build_cost / ncolumns; 
+                
+                if (!s_entry->index_triggered)
+                {
+                    s_entry->scan_count++;
+                    s_entry->accumulated_cost += scan_cost;
+                }
+
+                ereport(DEBUG1,
+                    (errmsg("autoindex: db=%u rel=%u attnums=%d scan_count=%ld "
+                            "accumulated_cost=%.2f build_cost=%.2f",
+                            dboid, reloid, (int) single_att,
+                            (long) s_entry->scan_count,
+                            s_entry->accumulated_cost,
+                            s_entry->build_cost)));
+            }
         }
 
         LWLockRelease(&AutoindexShmem->lock.lock);
@@ -147,13 +209,13 @@
 
 //       if (!entry)
 //       {
-//           if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
-//           {
-//               LWLockRelease(&AutoindexShmem->lock.lock);
-//               ereport(WARNING,
-//                       (errmsg("autoindex: shmem table full, dropping entry")));
-//               return;
-//           }
+        //   if (AutoindexShmem->num_entries >= AUTOINDEX_MAX_ENTRIES)
+        //   {
+        //       LWLockRelease(&AutoindexShmem->lock.lock);
+        //       ereport(WARNING,
+        //               (errmsg("autoindex: shmem table full, dropping entry")));
+        //       return;
+        //   }
 //           entry = &AutoindexShmem->entries[AutoindexShmem->num_entries++];
 //           entry->dboid           = dboid;
 //           entry->reloid          = reloid;
